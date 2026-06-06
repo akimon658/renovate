@@ -1,0 +1,38 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: 0 20 * * *
+
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync Mirror Branch
+        run: |
+          git remote add upstream https://github.com/renovatebot/renovate.git
+          git fetch upstream
+          git switch main
+          git reset --hard upstream/main
+          git push origin main --force
+
+      - name: Merge into Tangled Branch
+        run: |
+          git switch main-tangled
+          git merge main -m "Sync upstream changes"
+          git push origin main-tangled
