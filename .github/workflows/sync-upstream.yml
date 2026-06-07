@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      actions: write # Required to push changes in .github/workflows directory
       contents: write
 
     steps:
