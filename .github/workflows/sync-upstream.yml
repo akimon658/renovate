@@ -27,7 +27,7 @@ jobs:
         run: |
           git remote add upstream https://github.com/renovatebot/renovate.git
           git fetch upstream
-          git switch main
+          git switch --track origin/main
           git reset --hard upstream/main
           git push origin main --force
 
