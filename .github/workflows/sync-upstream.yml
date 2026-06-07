@@ -8,7 +8,7 @@ on:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
 
     permissions:
       actions: write # Required to push changes in .github/workflows directory
