@@ -26,12 +26,19 @@ const minimumReleaseAgeDatasources: Partial<
       'Wait until the npm package is three days old before raising the update. This a) introduces a short delay to allow for malware researchers and scanners to (possibly) detect any malicious behaviour in packages, and b) prevents the maintainer and/or NPM from unpublishing a package you already upgraded to, breaking builds.',
     minimumReleaseAge: '3 days',
   },
+  pypi: {
+    description:
+      'Wait until the Python package is three days old before raising the update. This introduces a short delay to allow for malware researchers and scanners to (possibly) detect any malicious behaviour in packages.',
+    minimumReleaseAge: '3 days',
+  },
 };
 
 /**
  * Certain update types don't currently support `releaseTimestamp`s, so applying `minimumReleaseAge` to them results in updates that will never come.
  *
  * Instead, we opt them out of `minimumReleaseAge`, and add a warning for the user.
+ *
+ * This must stay in sync with the update types documented as _not_ supported (❌) in `docs/usage/key-concepts/minimum-release-age.md`, so we opt-out any unsupported `updateType`s.
  *
  * These rules are datasource-agnostic (`matchDatasources` is added per preset), so they are shared across every generated `security:minimumReleaseAge*` preset to keep the warnings consistent.
  */
@@ -61,6 +68,15 @@ const unsupportedUpdateTypeRules: PackageRule[] = [
     minimumReleaseAge: null,
     prBodyNotes: [
       "⚠️ Renovate's pin functionality [does not currently](https://github.com/renovatebot/renovate/issues/40288) wire in the release age for a package, so the Minimum Release Age checks can apply. You will need to manually validate the Minimum Release Age for these package(s).",
+    ],
+  },
+  {
+    description:
+      'Do not require Minimum Release Age for update types that do not provide a release timestamp',
+    matchUpdateTypes: ['bump', 'lockfileUpdate', 'rollback'],
+    minimumReleaseAge: null,
+    prBodyNotes: [
+      '⚠️ Renovate does not enforce Minimum Release Age for `bump`, `lockfileUpdate`, or `rollback` updates, so these are raised without a Minimum Release Age check. You will need to manually validate the Minimum Release Age for these package(s).',
     ],
   },
 ];

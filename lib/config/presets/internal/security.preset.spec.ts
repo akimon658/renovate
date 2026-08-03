@@ -10,6 +10,7 @@ describe('config/presets/internal/security.preset', () => {
       expect.arrayContaining([
         'minimumReleaseAgeCrate',
         'minimumReleaseAgeNpm',
+        'minimumReleaseAgePypi',
       ]),
     );
   });
@@ -33,7 +34,13 @@ describe('config/presets/internal/security.preset', () => {
         updateTypesWithoutReleaseTimestampSupport.map(
           (rule) => rule.matchUpdateTypes,
         ),
-      ).toEqual([['lockFileMaintenance'], ['replacement'], ['pin']]);
+      ).toEqual([
+        ['lockFileMaintenance'],
+        ['replacement'],
+        ['pin'],
+        ['bump', 'lockfileUpdate', 'rollback'],
+      ]);
+
       for (const rule of updateTypesWithoutReleaseTimestampSupport) {
         expect(rule.matchDatasources).toEqual([datasource]);
         expect(rule.minimumReleaseAge).toBeNull();
