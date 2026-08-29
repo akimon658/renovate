@@ -12,6 +12,8 @@ import noStatefulGlobalRegex from './rules/no-stateful-global-regex.ts';
 import noToolsImport from './rules/no-tools-import.ts';
 import noUnquotedExecInterpolation from './rules/no-unquoted-exec-interpolation.ts';
 import noUnvalidatedPaginationUrl from './rules/no-unvalidated-pagination-url.ts';
+import preferCoerceArray from './rules/prefer-coerce-array.ts';
+import preferCoerceObject from './rules/prefer-coerce-object.ts';
 import preferFakeShaInSpecs from './rules/prefer-fake-sha-in-specs.ts';
 import preferFsUtil from './rules/prefer-fs-util.ts';
 import preferIsHelpers from './rules/prefer-is-helpers.ts';
@@ -20,6 +22,7 @@ import preferJsonPipe from './rules/prefer-json-pipe.ts';
 import preferLuxon from './rules/prefer-luxon.ts';
 import preferNullishUtil from './rules/prefer-nullish-util.ts';
 import preferPartialInSpecs from './rules/prefer-partial-in-specs.ts';
+import preferStubEnv from './rules/prefer-stub-env.ts';
 import requireRegexUtil from './rules/require-regex-util.ts';
 import testRootDescribe from './rules/test-root-describe.ts';
 import typesLocation from './rules/types-location.ts';
@@ -47,6 +50,8 @@ export default definePlugin({
     'no-tools-import': noToolsImport,
     'no-unquoted-exec-interpolation': noUnquotedExecInterpolation,
     'no-unvalidated-pagination-url': noUnvalidatedPaginationUrl,
+    'prefer-coerce-array': preferCoerceArray,
+    'prefer-coerce-object': preferCoerceObject,
     'prefer-fake-sha-in-specs': preferFakeShaInSpecs,
     'prefer-fs-util': preferFsUtil,
     'prefer-json-pipe': preferJsonPipe,
@@ -55,6 +60,7 @@ export default definePlugin({
     'prefer-is-object': preferIsObject,
     'prefer-nullish-util': preferNullishUtil,
     'prefer-partial-in-specs': preferPartialInSpecs,
+    'prefer-stub-env': preferStubEnv,
     'require-regex-util': requireRegexUtil,
     'test-root-describe': testRootDescribe,
     'types-location': typesLocation,
