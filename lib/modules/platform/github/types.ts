@@ -1,4 +1,4 @@
-import type { LongCommitSha } from '../../../util/git/types.ts';
+import type { LongCommitSha } from '../../../util/schema-utils/git.ts';
 import type { EmailAddress } from '../../../util/schema-utils/index.ts';
 import type { Pr, PrBodyStruct } from '../types.ts';
 
@@ -33,6 +33,7 @@ export interface Comment {
 export interface GhRestRepo {
   full_name: string;
   default_branch: string;
+  ssh_url: string | null;
   owner: {
     login: string;
   };
@@ -86,12 +87,30 @@ export interface UserDetails {
   email: EmailAddress | null;
 }
 
+interface GithubHostBase {
+  apiUrl: URL;
+}
+
+export interface GithubComHost extends GithubHostBase {
+  type: 'github';
+}
+
+export interface GithubEnterpriseCloudHost extends GithubHostBase {
+  type: 'ghec';
+}
+
+export interface GithubEnterpriseServerHost extends GithubHostBase {
+  type: 'ghes';
+  version: string | null;
+}
+
+export type GithubHost =
+  | GithubComHost
+  | GithubEnterpriseCloudHost
+  | GithubEnterpriseServerHost;
+
 export interface PlatformConfig {
-  hostType: string;
-  endpoint: string;
-  isGhe?: boolean;
-  isGheCloud?: boolean;
-  gheVersion?: string | null;
+  host: GithubHost;
   isGHApp?: boolean;
   existingRepos?: string[];
   userDetails?: UserDetails;
@@ -119,10 +138,12 @@ export interface LocalRepoConfig {
   autoMergeAllowed: boolean;
   hasIssuesEnabled: boolean;
   hasVulnerabilityAlertsEnabled: boolean;
+  mergeQueueEnabled: Record<string, boolean>;
 }
 
 export interface GhRepo {
   id: string;
+  sshUrl: string | null;
   isFork: boolean;
   parent?: {
     nameWithOwner: string;
@@ -132,6 +153,7 @@ export interface GhRepo {
   autoMergeAllowed: boolean;
   hasIssuesEnabled: boolean;
   hasVulnerabilityAlertsEnabled: boolean;
+  mergeQueue?: { id: string } | null;
   mergeCommitAllowed: boolean;
   rebaseMergeAllowed: boolean;
   squashMergeAllowed: boolean;

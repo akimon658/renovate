@@ -1,4 +1,4 @@
-import type { LongCommitSha } from '../../../util/git/types.ts';
+import type { LongCommitSha } from '../../../util/schema-utils/git.ts';
 import { getPrBodyStruct } from '../pr-body.ts';
 import type { Pr } from '../types.ts';
 import type { TangledPull } from './types.ts';
@@ -21,7 +21,7 @@ export function tidToNumber(tid: string): number {
   for (const c of tid) {
     n = n * 32n + BigInt(TID_CHARSET.indexOf(c));
   }
-  return Number(n >> 10n);
+  return parseInt((n >> 10n).toString(), 10);
 }
 
 /**

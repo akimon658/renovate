@@ -110,7 +110,7 @@ describe('util/http/index', () => {
 
   it('get', async () => {
     httpMock.scope(baseUrl).get('/test').reply(200);
-    expect(await http.getText('http://renovate.com/test')).toEqual({
+    await expect(http.getText('http://renovate.com/test')).resolves.toEqual({
       authorization: false,
       body: '',
       headers: {},
@@ -232,9 +232,9 @@ describe('util/http/index', () => {
 
   it('postJson', async () => {
     httpMock.scope(baseUrl).post('/').reply(200, {});
-    expect(
-      await http.postJson('http://renovate.com', { body: {}, baseUrl }),
-    ).toEqual({
+    await expect(
+      http.postJson('http://renovate.com', { body: {}, baseUrl }),
+    ).resolves.toEqual({
       authorization: false,
       body: {},
       headers: {
@@ -247,9 +247,9 @@ describe('util/http/index', () => {
 
   it('putJson', async () => {
     httpMock.scope(baseUrl).put('/').reply(200, {});
-    expect(
-      await http.putJson('http://renovate.com', { body: {}, baseUrl }),
-    ).toEqual({
+    await expect(
+      http.putJson('http://renovate.com', { body: {}, baseUrl }),
+    ).resolves.toEqual({
       authorization: false,
       body: {},
       headers: {
@@ -262,9 +262,9 @@ describe('util/http/index', () => {
 
   it('patchJson', async () => {
     httpMock.scope(baseUrl).patch('/').reply(200, {});
-    expect(
-      await http.patchJson('http://renovate.com', { body: {}, baseUrl }),
-    ).toEqual({
+    await expect(
+      http.patchJson('http://renovate.com', { body: {}, baseUrl }),
+    ).resolves.toEqual({
       authorization: false,
       body: {},
       headers: {
@@ -277,9 +277,9 @@ describe('util/http/index', () => {
 
   it('deleteJson', async () => {
     httpMock.scope(baseUrl).delete('/').reply(200, {});
-    expect(
-      await http.deleteJson('http://renovate.com', { body: {}, baseUrl }),
-    ).toEqual({
+    await expect(
+      http.deleteJson('http://renovate.com', { body: {}, baseUrl }),
+    ).resolves.toEqual({
       authorization: false,
       body: {},
       headers: {
@@ -294,7 +294,9 @@ describe('util/http/index', () => {
     httpMock.scope(baseUrl).head('/').reply(200, undefined, {
       'content-type': 'application/json',
     });
-    expect(await http.headJson('http://renovate.com', { baseUrl })).toEqual({
+    await expect(
+      http.headJson('http://renovate.com', { baseUrl }),
+    ).resolves.toEqual({
       authorization: false,
       body: '',
       headers: {
@@ -345,9 +347,9 @@ describe('util/http/index', () => {
     let bar = false;
     let baz = false;
 
-    const dummyResolve = (_: unknown): void => {
+    function dummyResolve(_: unknown): void {
       return;
-    };
+    }
 
     interface MockedRequestResponse<T = unknown> {
       request: Promise<T>;
@@ -356,7 +358,7 @@ describe('util/http/index', () => {
       resolveResponse: (_?: T) => void;
     }
 
-    const mockRequestResponse = (): MockedRequestResponse => {
+    function mockRequestResponse(): MockedRequestResponse {
       let resolveRequest = dummyResolve;
       const request = new Promise((resolve) => {
         resolveRequest = resolve;
@@ -368,7 +370,7 @@ describe('util/http/index', () => {
       });
 
       return { request, resolveRequest, response, resolveResponse };
-    };
+    }
 
     const {
       request: fooReq,
@@ -436,16 +438,9 @@ describe('util/http/index', () => {
   });
 
   describe('retry', () => {
-    let NODE_ENV: string | undefined;
-
-    beforeAll(() => {
-      NODE_ENV = process.env.NODE_ENV;
-      delete process.env.NODE_ENV;
+    beforeEach(() => {
+      vi.stubEnv('NODE_ENV', undefined);
       http = new Http('dummy');
-    });
-
-    afterAll(() => {
-      process.env.NODE_ENV = NODE_ENV;
     });
 
     it('works', async () => {
@@ -455,7 +450,7 @@ describe('util/http/index', () => {
         .reply(500)
         .head('/')
         .reply(200, undefined, { 'x-some-header': 'abc' });
-      expect(await http.head('http://renovate.com')).toEqual({
+      await expect(http.head('http://renovate.com')).resolves.toEqual({
         authorization: false,
         body: '',
         headers: {
@@ -657,7 +652,7 @@ describe('util/http/index', () => {
           .get('/')
           .reply(200, JSON.stringify({ x: 2, y: 2 }));
 
-        const { body }: HttpResponse<string> = await http.getJson(
+        const { body }: HttpResponse = await http.getJson(
           'http://renovate.com',
           { headers: { accept: 'application/json' } },
           Some,
@@ -731,7 +726,7 @@ describe('util/http/index', () => {
           .post('/')
           .reply(200, JSON.stringify({ x: 2, y: 2 }));
 
-        const { body }: HttpResponse<string> = await http.postJson(
+        const { body }: HttpResponse = await http.postJson(
           'http://renovate.com',
           Some,
         );
@@ -841,7 +836,9 @@ describe('util/http/index', () => {
         .get('/')
         .reply(200, '!@#$%^');
 
-      await expect(http.getToml('http://renovate.com')).rejects.toThrow();
+      await expect(http.getToml('http://renovate.com')).rejects.toThrow(
+        'Invalid TOML',
+      );
     });
   });
 });

@@ -8,15 +8,13 @@ on:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
-
-    permissions:
-      contents: write
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
 
       - name: Configure Git
         run: |
@@ -27,7 +25,7 @@ jobs:
         run: |
           git remote add upstream https://github.com/renovatebot/renovate.git
           git fetch upstream
-          git switch main
+          git switch --track origin/main
           git reset --hard upstream/main
           git push origin main --force
 
