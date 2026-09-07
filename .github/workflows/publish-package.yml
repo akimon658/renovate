@@ -7,6 +7,9 @@ on:
 
   workflow_dispatch:
 
+env:
+  NODE_VERSION: 24
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -24,6 +27,7 @@ jobs:
         with:
           cache: true
           require-lockfile: true
+          runtime: node@${{ env.NODE_VERSION }}
 
       - run: pnpm build
 
