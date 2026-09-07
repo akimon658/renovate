@@ -28,7 +28,7 @@ jobs:
 
       - name: Dynamically Rewrite package.json for Custom Release
         run: |
-          node -e '
+          node <<'EOF'
             const fs = require("fs");
             const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
 
@@ -45,7 +45,7 @@ jobs:
 
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
             console.log(`🚀 Patched package.json for custom release: ${pkg.name}@${pkg.version}`);
-          '
+          EOF
 
       - name: Authenticate with GitHub Packages
         run: |

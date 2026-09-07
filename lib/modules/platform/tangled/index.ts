@@ -1,3 +1,4 @@
+import { DateTime } from 'luxon';
 import { logger } from '../../../logger/index.ts';
 import type { BranchStatus } from '../../../types/index.ts';
 import { parseJson } from '../../../util/common.ts';
@@ -313,7 +314,7 @@ const platform: Platform = {
       sourceBranch,
       targetBranch,
       bodyStruct: (await import('../pr-body.ts')).getPrBodyStruct(body),
-      createdAt: new Date().toISOString(),
+      createdAt: DateTime.utc().toISO(),
     };
 
     logger.info(

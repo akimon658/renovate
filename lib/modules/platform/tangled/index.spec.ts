@@ -23,7 +23,7 @@ function mockPull(overrides?: Partial<TangledPull>): TangledPull {
       title: 'Update dependency foo to v2',
       body: 'PR body text',
       target: {
-        repo: 'did:plc:repo123' as any,
+        repo: 'did:plc:repo123',
         branch: 'main',
       },
       source: {
@@ -33,10 +33,11 @@ function mockPull(overrides?: Partial<TangledPull>): TangledPull {
       rounds: [
         {
           patchBlob: {
+            $type: 'blob',
             ref: { $link: 'bafyref' },
             mimeType: 'application/gzip',
             size: 1024,
-          } as any,
+          },
           createdAt: '2025-01-01T00:00:00.000Z',
         },
       ],
@@ -223,6 +224,34 @@ describe('modules/platform/tangled/index', () => {
       const result = await tangled.getRawFile('package.json', 'other/repo');
       expect(result).toBeNull();
     });
+
+    it('should use the provided branch or tag', async () => {
+      await initFakeRepo();
+      helperMock.getBlob.mockResolvedValueOnce('file content');
+
+      const result = await tangled.getRawFile(
+        'package.json',
+        undefined,
+        'v1.0.0',
+      );
+      expect(result).toBe('file content');
+      expect(helperMock.getBlob).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+        'v1.0.0',
+        'package.json',
+      );
+    });
+  });
+
+  describe('getJsonFile()', () => {
+    it('should parse raw file content as JSON', async () => {
+      await initFakeRepo();
+      helperMock.getBlob.mockResolvedValueOnce('{"foo":"bar"}');
+
+      const result = await tangled.getJsonFile('renovate.json');
+      expect(result).toEqual({ foo: 'bar' });
+    });
   });
 
   describe('getPrList()', () => {
@@ -249,7 +278,7 @@ describe('modules/platform/tangled/index', () => {
         record: {
           ...mockPull().record,
           target: {
-            repo: 'did:plc:other-repo' as any,
+            repo: 'did:plc:other-repo',
             branch: 'main',
           },
         },
@@ -257,6 +286,26 @@ describe('modules/platform/tangled/index', () => {
       helperMock.listPullRecords.mockResolvedValueOnce([
         matchingPull,
         otherPull,
+      ]);
+
+      const list = await tangled.getPrList();
+      expect(list).toHaveLength(1);
+      expect(list[0].number).toBe(mockPrNumber);
+    });
+
+    it('should skip pulls that cannot be converted', async () => {
+      await initFakeRepo();
+      const invalidPull = mockPull({
+        rkey: '3lbvg3wn2cs2k',
+        uri: 'at://did:plc:bot/sh.tangled.repo.pull/3lbvg3wn2cs2k',
+        record: {
+          ...mockPull().record,
+          source: { branch: '', repo: undefined as any },
+        },
+      });
+      helperMock.listPullRecords.mockResolvedValueOnce([
+        mockPull(),
+        invalidPull,
       ]);
 
       const list = await tangled.getPrList();
@@ -347,6 +396,18 @@ describe('modules/platform/tangled/index', () => {
         state: 'all',
       });
       expect(pr).toBeNull();
+    });
+
+    it('should match by title', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+
+      const pr = await tangled.findPr({
+        branchName: 'renovate/foo-2.x',
+        prTitle: 'Update dependency foo to v2',
+        state: 'all',
+      });
+      expect(pr).not.toBeNull();
     });
   });
 
@@ -455,6 +516,36 @@ describe('modules/platform/tangled/index', () => {
 
       expect(helperMock.updatePullRecord).not.toHaveBeenCalled();
     });
+
+    it('should update body only', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+
+      await tangled.updatePr({
+        number: mockPrNumber,
+        prTitle: '',
+        prBody: 'New body',
+      });
+
+      expect(helperMock.updatePullRecord).toHaveBeenCalledWith(mockRkey, {
+        body: 'New body',
+      });
+    });
+
+    it('should skip record update when there is nothing to update', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+
+      await tangled.updatePr({
+        number: mockPrNumber,
+        prTitle: '',
+      });
+
+      expect(helperMock.updatePullRecord).not.toHaveBeenCalled();
+      expect(helperMock.setPullStatus).not.toHaveBeenCalled();
+    });
   });
 
   describe('mergePr()', () => {
@@ -497,6 +588,32 @@ describe('modules/platform/tangled/index', () => {
       await tangled.getPrList();
 
       helperMock.compare.mockRejectedValueOnce(new Error('merge conflict'));
+
+      const result = await tangled.mergePr({ id: mockPrNumber });
+      expect(result).toBe(false);
+    });
+
+    it('should return false when the PR disappears from the list', async () => {
+      await initFakeRepo();
+      helperMock.compare.mockResolvedValueOnce(Buffer.from('patch data'));
+      helperMock.uploadBlob.mockResolvedValueOnce({
+        ref: { $link: 'bafyblob' },
+        mimeType: 'application/gzip',
+        size: 100,
+      });
+      helperMock.createPullRecord.mockResolvedValueOnce({
+        uri: `at://did:plc:bot/sh.tangled.repo.pull/${mockRkey}`,
+        cid: 'bafycid',
+        rkey: mockRkey,
+      });
+      await tangled.createPr({
+        sourceBranch: 'renovate/foo-2.x',
+        targetBranch: 'main',
+        prTitle: 'Update foo',
+        prBody: 'PR body',
+      });
+
+      helperMock.listPullRecords.mockResolvedValueOnce([]);
 
       const result = await tangled.mergePr({ id: mockPrNumber });
       expect(result).toBe(false);

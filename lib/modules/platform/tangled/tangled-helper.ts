@@ -2,6 +2,7 @@ import type {} from '@atcute/atproto';
 import { Client, ok, simpleFetchHandler } from '@atcute/client';
 import { PasswordSession } from '@atcute/password-session';
 import type { ShTangledRepoPull } from '@atcute/tangled';
+import { DateTime } from 'luxon';
 import { TangledHttp } from '../../../util/http/tangled.ts';
 import { getQueryString } from '../../../util/url.ts';
 import type { TangledPull, TangledPullStatus } from './types.ts';
@@ -32,7 +33,7 @@ function generateTid(): string {
   let result = '';
   let remaining = value;
   for (let i = 0; i < 13; i++) {
-    result = TID_CHARSET[Number(remaining & 31n)] + result;
+    result = TID_CHARSET[parseInt((remaining & 31n).toString(), 10)] + result;
     remaining >>= 5n;
   }
   return result;
@@ -171,11 +172,7 @@ export async function uploadBlob(
       input: new Blob([data as BlobPart], { type: 'application/gzip' }),
     }),
   );
-  return result.blob as {
-    ref: { $link: string };
-    mimeType: string;
-    size: number;
-  };
+  return result.blob;
 }
 
 /**
@@ -195,7 +192,7 @@ export async function createPullRecord(
   }
 
   const rkey = generateTid();
-  const now = new Date().toISOString();
+  const now = DateTime.utc().toISO();
 
   const record: ShTangledRepoPull.Main = {
     $type: 'sh.tangled.repo.pull',

@@ -1,3 +1,4 @@
+import { getPrBodyStruct } from '../pr-body.ts';
 import type { TangledPull } from './types.ts';
 import { rkeyFromUri, tidToNumber, toRenovatePr } from './utils.ts';
 
@@ -58,7 +59,7 @@ describe('modules/platform/tangled/utils', () => {
         title: 'Update dependency foo to v2',
         body: 'This PR updates foo.',
         target: {
-          repo: 'did:plc:repo123' as any,
+          repo: 'did:plc:repo123',
           branch: 'main',
         },
         source: {
@@ -68,10 +69,11 @@ describe('modules/platform/tangled/utils', () => {
         rounds: [
           {
             patchBlob: {
+              $type: 'blob',
               ref: { $link: 'bafyref123' },
               mimeType: 'application/gzip',
               size: 1024,
-            } as any,
+            },
             createdAt: '2025-01-01T00:00:00.000Z',
           },
         ],
@@ -120,7 +122,7 @@ describe('modules/platform/tangled/utils', () => {
         ...basePull,
         record: {
           ...basePull.record,
-          target: { repo: 'did:plc:repo' as any, branch: '' },
+          target: { repo: 'did:plc:repo', branch: '' },
         },
       };
       const pr = toRenovatePr(pull);
@@ -132,6 +134,19 @@ describe('modules/platform/tangled/utils', () => {
       expect(pr!.sha).toBe('bafyref123');
     });
 
+    it('falls back to an empty body when the record body is missing', () => {
+      const pull: TangledPull = {
+        ...basePull,
+        record: {
+          ...basePull.record,
+          body: undefined,
+        },
+      };
+      const pr = toRenovatePr(pull);
+      expect(pr).not.toBeNull();
+      expect(pr!.bodyStruct).toEqual(getPrBodyStruct(''));
+    });
+
     it('includes sourceRepo from pull record', () => {
       const pullWithSourceRepo: TangledPull = {
         ...basePull,
@@ -139,7 +154,7 @@ describe('modules/platform/tangled/utils', () => {
           ...basePull.record,
           source: {
             branch: 'renovate/foo-2.x',
-            repo: 'did:plc:forkrepo' as any,
+            repo: 'did:plc:forkrepo',
           },
         },
       };
