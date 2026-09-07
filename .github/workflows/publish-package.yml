@@ -20,11 +20,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           cache: true
-          run_install: |
-            - args: --frozen-lockfile
+          require-lockfile: true
 
       - run: pnpm build
 
