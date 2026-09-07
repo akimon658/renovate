@@ -10,6 +10,7 @@ import * as github from './github/index.ts';
 import * as gitlab from './gitlab/index.ts';
 import * as local from './local/index.ts';
 import * as scmm from './scm-manager/index.ts';
+import * as tangled from './tangled/index.ts';
 import type { Platform } from './types.ts';
 
 const api = new Map<PlatformId, Platform>();
@@ -26,3 +27,4 @@ api.set(github.id, github);
 api.set(gitlab.id, gitlab);
 api.set(local.id, local);
 api.set(scmm.id, scmm);
+api.set(tangled.id, tangled);

@@ -34,6 +34,7 @@ async function getResolver(platform: PlatformId): Promise<ResolverOrNull> {
     case 'codecommit':
     case 'local':
     case 'scm-manager':
+    case 'tangled':
       return null;
   }
 }

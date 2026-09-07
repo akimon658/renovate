@@ -1,3 +1,52 @@
+# @akimon658's Fork Note
+
+This fork adds support for [Tangled](https://tangled.sh), a git hosting platform built on the AT Protocol.
+
+## Account Setup
+
+1. Create an AT Protocol account for the Renovate bot (e.g. on [Bluesky](https://bsky.app)). A dedicated bot account is recommended.
+2. Generate an App Password from Bluesky Settings > App Passwords.
+3. Register an SSH key for the bot account on Tangled. Git operations (clone/push) use SSH (`git@{knotHost}:{ownerDid}/{repoName}`).
+
+## Configuration
+
+```js
+module.exports = {
+  platform: 'tangled',
+  username: 'your-bot.bsky.social', // AT Protocol handle
+  password: 'xxxx-xxxx-xxxx-xxxx', // App Password
+  gitAuthor: 'Renovate Bot <renovate@example.com>', // Required for Tangled
+  // endpoint: 'https://bsky.social',      // Only change for self-hosted PDS
+  repositories: [
+    'owner-handle.bsky.social/repo-name', // "handle/repo-name" format
+  ],
+};
+```
+
+Or with environment variables:
+
+```bash
+export RENOVATE_PLATFORM=tangled
+export RENOVATE_USERNAME=your-bot.bsky.social
+export RENOVATE_PASSWORD=xxxx-xxxx-xxxx-xxxx
+export RENOVATE_GIT_AUTHOR='Renovate Bot <renovate@example.com>'
+export RENOVATE_REPOSITORIES='["owner-handle.bsky.social/repo-name"]'
+```
+
+## Current Limitations
+
+| Feature                                   | Status                                                  |
+| ----------------------------------------- | ------------------------------------------------------- |
+| Create / update / close / merge PRs       | Supported                                               |
+| Read files (`getRawFile` / `getJsonFile`) | Supported                                               |
+| Repository autodiscovery (`getRepos`)     | Not supported — list repos explicitly in `repositories` |
+| Issues                                    | Not supported (no-op)                                   |
+| Branch status checks                      | Not supported (always returns `green`)                  |
+| Reviewers / assignees                     | Not supported (no-op)                                   |
+| Labels                                    | Not supported (no-op)                                   |
+
+---
+
 ![Mend Renovate CLI banner](https://docs.renovatebot.com/assets/images/mend-renovate-cli-banner.jpg)
 
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-%20%09AGPL--3.0--only-blue.svg)](https://raw.githubusercontent.com/renovatebot/renovate/main/license)

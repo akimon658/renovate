@@ -1,0 +1,58 @@
+name: Build and Publish Custom Renovate
+
+on:
+  push:
+    branches:
+      - main-tangled
+
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          cache: true
+          run_install: |
+            - args: --frozen-lockfile
+
+      - run: pnpm build
+
+      - name: Dynamically Rewrite package.json for Custom Release
+        run: |
+          node <<'EOF'
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+
+            const upstreamVersion = pkg.version;
+
+            pkg.name = "@akimon658/renovate";
+
+            pkg.version = `${upstreamVersion}-tangled.${process.env.GITHUB_RUN_NUMBER}`;
+
+            pkg.publishConfig = {
+              "registry": "https://npm.pkg.github.com",
+              "access": "public"
+            };
+
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+            console.log(`🚀 Patched package.json for custom release: ${pkg.name}@${pkg.version}`);
+          EOF
+
+      - name: Authenticate with GitHub Packages
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
+
+      - name: Publish to GitHub Packages
+        run: |
+          pnpm publish --no-git-checks

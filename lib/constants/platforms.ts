@@ -10,6 +10,7 @@ export const PLATFORM_HOST_TYPES = [
   'gitlab',
   'local',
   'scm-manager',
+  'tangled',
 ] as const;
 
 export type PlatformId = (typeof PLATFORM_HOST_TYPES)[number];
