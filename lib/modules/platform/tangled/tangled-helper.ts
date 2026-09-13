@@ -496,6 +496,20 @@ export async function resolvePdsEndpoint(did: string): Promise<string> {
 }
 
 /**
+ * Resolve the PDS endpoint that hosts an account, given its handle.
+ *
+ * The handle is resolved to a DID, then the DID document is used to find the
+ * PDS service URL, so no PDS configuration is required.
+ */
+export async function resolvePdsForHandle(
+  handle: string,
+): Promise<{ did: string; pdsUrl: string }> {
+  const did = await resolveHandle(handle);
+  const pdsUrl = await resolvePdsEndpoint(did);
+  return { did, pdsUrl };
+}
+
+/**
  * Build a repository reference from a raw `sh.tangled.repo` record value.
  */
 function toRepoRef(
