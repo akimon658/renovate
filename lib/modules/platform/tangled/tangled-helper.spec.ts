@@ -251,9 +251,10 @@ describe('modules/platform/tangled/tangled-helper', () => {
   });
 
   describe('compare', () => {
-    it('returns the format-patch buffer', async () => {
-      const buffer = Buffer.from('patch data');
-      httpMocks.getBuffer.mockResolvedValueOnce({ body: buffer });
+    it('returns the raw format-patch from the JSON response', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { patch: 'patch data' },
+      });
 
       await expect(
         helper.compare(
@@ -262,7 +263,13 @@ describe('modules/platform/tangled/tangled-helper', () => {
           'main',
           'renovate/foo-2.x',
         ),
-      ).resolves.toEqual(buffer);
+      ).resolves.toBe('patch data');
+
+      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'https://knot.example.com/xrpc/sh.tangled.repo.compare?',
+        ),
+      );
     });
   });
 
