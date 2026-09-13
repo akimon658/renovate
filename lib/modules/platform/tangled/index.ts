@@ -168,21 +168,24 @@ const platform: Platform = {
     const ownerDid = await helper.resolveHandle(ownerHandle);
     config.ownerDid = ownerDid;
 
-    // Look up the knot host from the sh.tangled.repo record
-    const knotHost = await helper.getRepoKnotHost(ownerDid, repoName);
-    config.knotHost = knotHost;
+    // Resolve the sh.tangled.repo record from the owner's PDS
+    const repoRef = await helper.resolveRepoRef(ownerDid, repoName);
+    config.knotHost = repoRef.knot;
 
-    // Get the repo DID from the knotserver
-    const repoInfo = await helper.describeRepo(
-      knotHost,
-      `${ownerDid}/${repoName}`,
-    );
-    config.repoDid = repoInfo.repoDid;
+    // The knot API only accepts a repo DID, so we cannot continue without one
+    if (!repoRef.repoDid) {
+      throw new Error(`Could not determine repo DID for ${repository}`);
+    }
+
+    // Get the canonical repo DID and rkey from the knotserver
+    const repoInfo = await helper.describeRepo(repoRef.knot, repoRef.repoDid);
+    config.repoDid = repoInfo.repoDid || repoRef.repoDid;
+    config.knotRkey = repoInfo.rkey || repoRef.rkey || repoName;
 
     // Get the default branch
     const branchInfo = await helper.getDefaultBranch(
-      knotHost,
-      `${config.repoDid}/${repoName}`,
+      repoRef.knot,
+      config.repoDid,
     );
     config.defaultBranch = branchInfo.name;
 
@@ -191,14 +194,14 @@ const platform: Platform = {
         repository,
         ownerDid,
         repoDid: config.repoDid,
-        knotHost,
+        knotHost: repoRef.knot,
         defaultBranch: config.defaultBranch,
       },
       'Tangled repo initialized',
     );
 
     // Initialize git with SSH URL
-    const sshUrl = `git@${knotHost}:${ownerDid}/${repoName}`;
+    const sshUrl = `git@${repoRef.knot}:${ownerDid}/${config.knotRkey}`;
     await git.initRepo({
       url: sshUrl,
       defaultBranch: config.defaultBranch,
@@ -280,7 +283,7 @@ const platform: Platform = {
     // Step 1: Get the format-patch from the knotserver
     const patchBuffer = await helper.compare(
       config.knotHost,
-      `${config.repoDid}/${config.repoName}`,
+      config.repoDid,
       targetBranch,
       sourceBranch,
     );
@@ -381,7 +384,7 @@ const platform: Platform = {
       // Get the patch from the knotserver
       const patchBuffer = await helper.compare(
         config.knotHost,
-        `${config.repoDid}/${config.repoName}`,
+        config.repoDid,
         pr.targetBranch!,
         pr.sourceBranch,
       );
@@ -389,8 +392,9 @@ const platform: Platform = {
       // Merge via the knotserver
       await helper.mergePull(
         config.knotHost,
+        config.repoDid,
         config.ownerDid,
-        config.repoName,
+        config.knotRkey,
         pr.targetBranch!,
         patchBuffer.toString('utf-8'),
       );
