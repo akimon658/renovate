@@ -2,7 +2,7 @@ import { git } from '~test/util.ts';
 import { repoFingerprint } from '../util.ts';
 import * as tangled from './index.ts';
 import * as helper from './tangled-helper.ts';
-import type { TangledPull } from './types.ts';
+import type { TangledPull, TangledRepoRef } from './types.ts';
 import { tidToNumber } from './utils.ts';
 
 vi.mock('../../../util/git/index.ts');
@@ -65,13 +65,23 @@ describe('modules/platform/tangled/index', () => {
     });
   });
 
-  async function initFakeRepo(): Promise<void> {
+  async function initFakeRepo(
+    repoRef?: Partial<TangledRepoRef>,
+    repoInfo?: Partial<{ ownerDid: string; repoDid: string; rkey: string }>,
+  ): Promise<void> {
     helperMock.resolveHandle.mockResolvedValueOnce('did:plc:owner');
-    helperMock.getRepoKnotHost.mockResolvedValueOnce('knot.example.com');
+    helperMock.resolveRepoRef.mockResolvedValueOnce({
+      knot: 'knot.example.com',
+      repoDid: 'did:plc:repo123',
+      name: 'my-repo',
+      rkey: 'my-repo',
+      ...repoRef,
+    });
     helperMock.describeRepo.mockResolvedValueOnce({
       ownerDid: 'did:plc:owner',
       repoDid: 'did:plc:repo123',
       rkey: 'my-repo',
+      ...repoInfo,
     });
     helperMock.getDefaultBranch.mockResolvedValueOnce({
       name: 'main',
@@ -154,9 +164,17 @@ describe('modules/platform/tangled/index', () => {
       expect(helperMock.resolveHandle).toHaveBeenCalledWith(
         'owner.bsky.social',
       );
-      expect(helperMock.getRepoKnotHost).toHaveBeenCalledWith(
+      expect(helperMock.resolveRepoRef).toHaveBeenCalledWith(
         'did:plc:owner',
         'my-repo',
+      );
+      expect(helperMock.describeRepo).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+      );
+      expect(helperMock.getDefaultBranch).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
       );
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -168,7 +186,12 @@ describe('modules/platform/tangled/index', () => {
 
     it('should return repo result', async () => {
       helperMock.resolveHandle.mockResolvedValueOnce('did:plc:owner');
-      helperMock.getRepoKnotHost.mockResolvedValueOnce('knot.example.com');
+      helperMock.resolveRepoRef.mockResolvedValueOnce({
+        knot: 'knot.example.com',
+        repoDid: 'did:plc:repo123',
+        name: 'my-repo',
+        rkey: 'my-repo',
+      });
       helperMock.describeRepo.mockResolvedValueOnce({
         ownerDid: 'did:plc:owner',
         repoDid: 'did:plc:repo123',
@@ -194,6 +217,76 @@ describe('modules/platform/tangled/index', () => {
       await expect(
         tangled.initRepo({ repository: 'invalid-format' }),
       ).rejects.toThrow('Invalid Tangled repository format');
+    });
+
+    it('should fall back to the PDS repo DID when the knot omits it', async () => {
+      helperMock.resolveHandle.mockResolvedValueOnce('did:plc:owner');
+      helperMock.resolveRepoRef.mockResolvedValueOnce({
+        knot: 'knot.example.com',
+        repoDid: 'did:plc:repo123',
+        name: 'my-repo',
+        rkey: 'my-repo',
+      });
+      helperMock.describeRepo.mockResolvedValueOnce({
+        ownerDid: 'did:plc:owner',
+        repoDid: '',
+        rkey: '',
+      });
+      helperMock.getDefaultBranch.mockResolvedValueOnce({
+        name: 'main',
+        hash: 'abc123',
+      });
+
+      const result = await tangled.initRepo({
+        repository: 'owner.bsky.social/my-repo',
+      });
+
+      expect(result.defaultBranch).toBe('main');
+      expect(helperMock.getDefaultBranch).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+      );
+      expect(git.initRepo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'git@knot.example.com:did:plc:owner/my-repo',
+        }),
+      );
+    });
+
+    it('should prefer the knot rkey over the requested name', async () => {
+      await initFakeRepo({ rkey: 'tid456' }, { rkey: '' });
+
+      expect(git.initRepo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'git@knot.example.com:did:plc:owner/tid456',
+        }),
+      );
+    });
+
+    it('should fall back to the requested name when no rkey is known', async () => {
+      await initFakeRepo({ rkey: '' }, { rkey: '' });
+
+      expect(git.initRepo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'git@knot.example.com:did:plc:owner/my-repo',
+        }),
+      );
+    });
+
+    it('should throw when the repo DID cannot be determined', async () => {
+      helperMock.resolveHandle.mockResolvedValueOnce('did:plc:owner');
+      helperMock.resolveRepoRef.mockResolvedValueOnce({
+        knot: 'knot.example.com',
+        repoDid: '',
+        name: 'my-repo',
+        rkey: 'my-repo',
+      });
+
+      await expect(
+        tangled.initRepo({ repository: 'owner.bsky.social/my-repo' }),
+      ).rejects.toThrow('Could not determine repo DID');
+
+      expect(helperMock.describeRepo).not.toHaveBeenCalled();
     });
   });
 
@@ -452,7 +545,7 @@ describe('modules/platform/tangled/index', () => {
 
       expect(helperMock.compare).toHaveBeenCalledWith(
         'knot.example.com',
-        'did:plc:repo123/my-repo',
+        'did:plc:repo123',
         'main',
         'renovate/foo-2.x',
       );
@@ -562,6 +655,7 @@ describe('modules/platform/tangled/index', () => {
 
       expect(helperMock.mergePull).toHaveBeenCalledWith(
         'knot.example.com',
+        'did:plc:repo123',
         'did:plc:owner',
         'my-repo',
         'main',
@@ -570,6 +664,27 @@ describe('modules/platform/tangled/index', () => {
       expect(helperMock.setPullStatus).toHaveBeenCalledWith(
         `at://did:plc:bot/sh.tangled.repo.pull/${mockRkey}`,
         'sh.tangled.repo.pull.status.closed',
+      );
+    });
+
+    it('should merge using the knot rkey', async () => {
+      await initFakeRepo({ rkey: 'tid456' }, { rkey: '' });
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+
+      helperMock.compare.mockResolvedValueOnce(Buffer.from('merge patch'));
+      helperMock.mergePull.mockResolvedValueOnce();
+
+      const result = await tangled.mergePr({ id: mockPrNumber });
+      expect(result).toBe(true);
+
+      expect(helperMock.mergePull).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+        'did:plc:owner',
+        'tid456',
+        'main',
+        'merge patch',
       );
     });
 

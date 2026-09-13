@@ -60,8 +60,7 @@ export function toRenovatePr(pull: TangledPull): Pr | null {
     sourceRepo: pull.record.source.repo,
     sha: (
       pull.record.rounds.at(-1) as
-        | { patchBlob?: { ref?: { $link?: string } } }
-        | undefined
+        { patchBlob?: { ref?: { $link?: string } } } | undefined
     )?.patchBlob?.ref?.$link as LongCommitSha | undefined,
   };
 }

@@ -2,10 +2,16 @@ import type {} from '@atcute/atproto';
 import { Client, ok, simpleFetchHandler } from '@atcute/client';
 import { PasswordSession } from '@atcute/password-session';
 import type { ShTangledRepoPull } from '@atcute/tangled';
+import { isObject } from '@sindresorhus/is';
 import { DateTime } from 'luxon';
+import { logger } from '../../../logger/index.ts';
 import { TangledHttp } from '../../../util/http/tangled.ts';
 import { getQueryString } from '../../../util/url.ts';
-import type { TangledPull, TangledPullStatus } from './types.ts';
+import type {
+  TangledPull,
+  TangledPullStatus,
+  TangledRepoRef,
+} from './types.ts';
 import { rkeyFromUri } from './utils.ts';
 
 const tangledHttp = new TangledHttp();
@@ -276,8 +282,7 @@ export async function updatePullRecord(
 export async function setPullStatus(
   pullUri: string,
   status:
-    | 'sh.tangled.repo.pull.status.open'
-    | 'sh.tangled.repo.pull.status.closed',
+    'sh.tangled.repo.pull.status.open' | 'sh.tangled.repo.pull.status.closed',
 ): Promise<void> {
   if (!pdsClient) {
     throw new Error('Not authenticated');
@@ -392,8 +397,9 @@ export async function listPullRecords(): Promise<TangledPull[]> {
  */
 export async function mergePull(
   knotHost: string,
+  repoDid: string,
   ownerDid: string,
-  repoName: string,
+  repoRkey: string,
   targetBranch: string,
   patch: string,
 ): Promise<void> {
@@ -405,8 +411,9 @@ export async function mergePull(
   const url = `https://${knotHost}/xrpc/sh.tangled.repo.merge`;
   await tangledHttp.postJson(url, {
     body: {
+      repo: repoDid,
       did: ownerDid,
-      name: repoName,
+      name: repoRkey,
       branch: targetBranch,
       patch,
     },
@@ -433,36 +440,166 @@ export async function resolveHandle(handle: string): Promise<string> {
 }
 
 /**
- * Look up the knot host for a repository by resolving the sh.tangled.repo
- * record from the owner's PDS.
+ * Default service used when the owner's PDS cannot be determined.
  */
-export async function getRepoKnotHost(
-  ownerDid: string,
-  repoRkey: string,
-): Promise<string> {
-  const client = new Client({
-    handler: simpleFetchHandler({
-      service: 'https://public.api.bsky.app',
-    }),
-  });
+const DEFAULT_SERVICE = 'https://public.api.bsky.app';
 
-  const result = await ok(
-    client.get('com.atproto.repo.getRecord', {
-      params: {
-        repo: ownerDid as any,
-        collection: 'sh.tangled.repo' as any,
-        rkey: repoRkey as any,
-      },
-    }),
-  );
+/**
+ * AT Protocol DID document, limited to the fields we need.
+ */
+interface DidDocument {
+  service?: {
+    id?: string;
+    type?: string;
+    serviceEndpoint?: string;
+  }[];
+}
 
-  const record = result.value as { knot?: string };
-  if (!record.knot) {
+/**
+ * Resolve the PDS endpoint for a DID using its DID document.
+ *
+ * `did:plc` DIDs are resolved via the PLC directory; `did:web` DIDs via
+ * their well-known DID document. Falls back to the bsky AppView when the
+ * document cannot be fetched.
+ */
+export async function resolvePdsEndpoint(did: string): Promise<string> {
+  let url: string;
+  if (did.startsWith('did:plc:')) {
+    url = `https://plc.directory/${did}`;
+  } else if (did.startsWith('did:web:')) {
+    const parts = did
+      .slice('did:web:'.length)
+      .split(':')
+      .map((segment) => decodeURIComponent(segment));
+    const host = parts[0];
+    const path = parts.slice(1).join('/');
+    url = path
+      ? `https://${host}/${path}/did.json`
+      : `https://${host}/.well-known/did.json`;
+  } else {
+    return DEFAULT_SERVICE;
+  }
+
+  try {
+    const res = await tangledHttp.getJsonUnchecked<DidDocument>(url);
+    const pds = res.body.service?.find((svc) => {
+      if (svc.type === 'AtprotoPersonalDataServer') {
+        return true;
+      }
+      return svc.id?.endsWith('#atproto_pds') ?? false;
+    });
+    return pds?.serviceEndpoint ?? DEFAULT_SERVICE;
+  } catch (err) {
+    logger.debug({ err, did }, 'Failed to resolve PDS endpoint for DID');
+    return DEFAULT_SERVICE;
+  }
+}
+
+/**
+ * Build a repository reference from a raw `sh.tangled.repo` record value.
+ */
+function toRepoRef(
+  value: unknown,
+  fallbackName: string,
+  rkey: string,
+): TangledRepoRef {
+  const record = value as { knot?: string; name?: string; repoDid?: string };
+  if (!record?.knot) {
     throw new Error(
-      `Could not determine knot host for ${ownerDid}/${repoRkey}`,
+      `Could not determine knot host for repository "${fallbackName}"`,
     );
   }
-  return record.knot;
+  return {
+    knot: record.knot,
+    repoDid: record.repoDid ?? '',
+    name: record.name ?? fallbackName,
+    rkey,
+  };
+}
+
+/**
+ * Returns whether an error is an AT Protocol `RecordNotFound` response.
+ */
+function isRecordNotFound(err: unknown): boolean {
+  return (
+    isObject(err) && (err as { error?: string }).error === 'RecordNotFound'
+  );
+}
+
+/**
+ * Resolve the `sh.tangled.repo` record for a repository.
+ *
+ * Repository records use an arbitrary rkey: older repositories use the
+ * repository name, while newer ones use a TID with the display name stored
+ * in the record's `name` field. We first attempt a direct lookup by name,
+ * then fall back to listing records and matching on `name`.
+ */
+export async function resolveRepoRef(
+  ownerDid: string,
+  repoName: string,
+): Promise<TangledRepoRef> {
+  const pds = await resolvePdsEndpoint(ownerDid);
+  const client = new Client({
+    handler: simpleFetchHandler({ service: pds }),
+  });
+
+  // Fast path: legacy repositories use the name as the rkey
+  let direct: { value: unknown } | null = null;
+  try {
+    direct = await ok(
+      client.get('com.atproto.repo.getRecord', {
+        params: {
+          repo: ownerDid as any,
+          collection: 'sh.tangled.repo' as any,
+          rkey: repoName as any,
+        },
+      }),
+    );
+  } catch (err) {
+    if (!isRecordNotFound(err)) {
+      throw err;
+    }
+    logger.debug(
+      { err, ownerDid, repoName },
+      'Direct sh.tangled.repo lookup missed, falling back to listRecords',
+    );
+  }
+
+  if (direct) {
+    const directName = (direct.value as { name?: string } | null)?.name;
+    // The rkey may point at a renamed record whose name no longer matches
+    if (!directName || directName === repoName) {
+      return toRepoRef(direct.value, repoName, repoName);
+    }
+  }
+
+  // Fallback: repository records may use a TID rkey
+  let cursor: string | undefined;
+  do {
+    const result = await ok(
+      client.get('com.atproto.repo.listRecords', {
+        params: {
+          repo: ownerDid as any,
+          collection: 'sh.tangled.repo' as any,
+          limit: 100,
+          ...(cursor ? { cursor } : {}),
+        },
+      }),
+    );
+
+    for (const rec of result.records) {
+      const value = rec.value as { name?: string };
+      if (value.name === repoName) {
+        return toRepoRef(value, repoName, rkeyFromUri(rec.uri));
+      }
+    }
+
+    cursor = result.cursor;
+  } while (cursor);
+
+  throw new Error(
+    `Tangled repository "${repoName}" was not found for ${ownerDid}`,
+  );
 }
 
 export function getBotDid(): string {

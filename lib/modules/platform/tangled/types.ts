@@ -9,8 +9,19 @@ export interface TangledRepoConfig {
   ownerDid: string;
   repoDid: string;
   repoName: string;
+  knotRkey: string;
   knotHost: string;
   defaultBranch: string;
+}
+
+/**
+ * Resolved reference to a Tangled repository's `sh.tangled.repo` record.
+ */
+export interface TangledRepoRef {
+  knot: string;
+  repoDid: string;
+  name: string;
+  rkey: string;
 }
 
 /**
