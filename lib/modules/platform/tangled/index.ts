@@ -293,7 +293,7 @@ const platform: Platform = {
     );
 
     // Step 1: Get the format-patch from the knotserver
-    const patchBuffer = await helper.compare(
+    const patch = await helper.compare(
       config.knotHost,
       config.repoDid,
       targetBranch,
@@ -302,7 +302,7 @@ const platform: Platform = {
 
     // Step 2: Compress the patch and upload as a blob
     const { gzipSync } = await import('node:zlib');
-    const gzipped = gzipSync(patchBuffer);
+    const gzipped = gzipSync(Buffer.from(patch, 'utf-8'));
     const blobRef = await helper.uploadBlob(gzipped);
 
     // Step 3: Create the pull record in the PDS
@@ -394,7 +394,7 @@ const platform: Platform = {
       }
 
       // Get the patch from the knotserver
-      const patchBuffer = await helper.compare(
+      const patch = await helper.compare(
         config.knotHost,
         config.repoDid,
         pr.targetBranch!,
@@ -408,7 +408,7 @@ const platform: Platform = {
         config.ownerDid,
         config.knotRkey,
         pr.targetBranch!,
-        patchBuffer.toString('utf-8'),
+        patch,
       );
 
       // Set PR status to merged

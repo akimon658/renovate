@@ -1,3 +1,5 @@
+import { promisify } from 'node:util';
+import * as zlib from 'node:zlib';
 import { git } from '~test/util.ts';
 import { repoFingerprint } from '../util.ts';
 import * as tangled from './index.ts';
@@ -8,6 +10,7 @@ import { tidToNumber } from './utils.ts';
 vi.mock('../../../util/git/index.ts');
 vi.mock('./tangled-helper.ts');
 
+const gunzip = promisify(zlib.gunzip);
 const helperMock = vi.mocked(helper);
 
 const mockRkey = '3lbvg3wn2cs2i';
@@ -562,7 +565,7 @@ describe('modules/platform/tangled/index', () => {
   describe('createPr()', () => {
     it('should create a pull request', async () => {
       await initFakeRepo();
-      helperMock.compare.mockResolvedValueOnce(Buffer.from('patch data'));
+      helperMock.compare.mockResolvedValueOnce('patch data');
       helperMock.uploadBlob.mockResolvedValueOnce({
         ref: { $link: 'bafyblob' },
         mimeType: 'application/gzip',
@@ -593,7 +596,10 @@ describe('modules/platform/tangled/index', () => {
         'main',
         'renovate/foo-2.x',
       );
-      expect(helperMock.uploadBlob).toHaveBeenCalled();
+      const uploaded = helperMock.uploadBlob.mock.calls[0][0];
+      await expect(gunzip(uploaded)).resolves.toEqual(
+        Buffer.from('patch data'),
+      );
       expect(helperMock.createPullRecord).toHaveBeenCalledWith(
         'did:plc:repo123',
         'main',
@@ -691,7 +697,7 @@ describe('modules/platform/tangled/index', () => {
       helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
       await tangled.getPrList();
 
-      helperMock.compare.mockResolvedValueOnce(Buffer.from('merge patch'));
+      helperMock.compare.mockResolvedValueOnce('merge patch');
       helperMock.mergePull.mockResolvedValueOnce();
 
       const result = await tangled.mergePr({ id: mockPrNumber });
@@ -716,7 +722,7 @@ describe('modules/platform/tangled/index', () => {
       helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
       await tangled.getPrList();
 
-      helperMock.compare.mockResolvedValueOnce(Buffer.from('merge patch'));
+      helperMock.compare.mockResolvedValueOnce('merge patch');
       helperMock.mergePull.mockResolvedValueOnce();
 
       const result = await tangled.mergePr({ id: mockPrNumber });
@@ -754,7 +760,7 @@ describe('modules/platform/tangled/index', () => {
 
     it('should return false when the PR disappears from the list', async () => {
       await initFakeRepo();
-      helperMock.compare.mockResolvedValueOnce(Buffer.from('patch data'));
+      helperMock.compare.mockResolvedValueOnce('patch data');
       helperMock.uploadBlob.mockResolvedValueOnce({
         ref: { $link: 'bafyblob' },
         mimeType: 'application/gzip',

@@ -150,17 +150,21 @@ export async function getBlob(
 
 /**
  * Get a format-patch comparing two revisions from the knotserver.
+ *
+ * The knotserver returns JSON (`sh.tangled.repo.compare`), with the raw
+ * format-patch series in the `patch` field. This is the value Tangled's
+ * appview gzips and stores as the pull's `patchBlob`.
  */
 export async function compare(
   knotHost: string,
   repo: string,
   rev1: string,
   rev2: string,
-): Promise<Buffer> {
+): Promise<string> {
   const query = getQueryString({ repo, rev1, rev2 });
   const url = `https://${knotHost}/xrpc/sh.tangled.repo.compare?${query}`;
-  const res = await tangledHttp.getBuffer(url);
-  return Buffer.from(res.body);
+  const res = await tangledHttp.getJsonUnchecked<{ patch: string }>(url);
+  return res.body.patch;
 }
 
 /**
