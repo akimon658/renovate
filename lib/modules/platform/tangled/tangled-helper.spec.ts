@@ -612,6 +612,30 @@ describe('modules/platform/tangled/tangled-helper', () => {
     });
   });
 
+  describe('resolvePdsForHandle', () => {
+    it('resolves a handle to its PDS endpoint', async () => {
+      mockGet.mockResolvedValueOnce({ did: 'did:plc:resolved' });
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          service: [
+            {
+              id: '#atproto_pds',
+              type: 'AtprotoPersonalDataServer',
+              serviceEndpoint: 'https://pds.example.com',
+            },
+          ],
+        },
+      });
+
+      await expect(
+        helper.resolvePdsForHandle('user.bsky.social'),
+      ).resolves.toEqual({
+        did: 'did:plc:resolved',
+        pdsUrl: 'https://pds.example.com',
+      });
+    });
+  });
+
   describe('resolvePdsEndpoint', () => {
     it('resolves a did:plc through the PLC directory', async () => {
       httpMocks.getJsonUnchecked.mockResolvedValueOnce({

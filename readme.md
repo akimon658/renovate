@@ -1,12 +1,14 @@
 # @akimon658's Fork Note
 
-This fork adds support for [Tangled](https://tangled.sh), a git hosting platform built on the AT Protocol.
+This fork adds support for [Tangled](https://tangled.org), a git hosting platform built on the AT Protocol.
 
 ## Account Setup
 
 1. Create an AT Protocol account for the Renovate bot (e.g. on [Bluesky](https://bsky.app)). A dedicated bot account is recommended.
 2. Generate an App Password from Bluesky Settings > App Passwords.
-3. Register an SSH key for the bot account on Tangled. Git operations (clone/push) use SSH (`git@{knotHost}:{ownerDid}/{repoName}`).
+3. Register an SSH key for the bot account on Tangled. Git operations (clone/push) use SSH (`git@tangled.org:{ownerDid}/{repoName}`).
+
+The bot account's PDS is resolved automatically from the handle, so no PDS configuration is needed.
 
 ## Configuration
 
@@ -16,7 +18,7 @@ module.exports = {
   username: 'your-bot.bsky.social', // AT Protocol handle
   password: 'xxxx-xxxx-xxxx-xxxx', // App Password
   gitAuthor: 'Renovate Bot <renovate@example.com>', // Required for Tangled
-  // endpoint: 'https://bsky.social',      // Only change for self-hosted PDS
+  // endpoint: 'https://tangled.org', // Tangled base URL, used as the SSH host
   repositories: [
     'owner-handle.bsky.social/repo-name', // "handle/repo-name" format
   ],

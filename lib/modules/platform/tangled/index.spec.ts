@@ -52,6 +52,11 @@ describe('modules/platform/tangled/index', () => {
   beforeEach(async () => {
     tangled.resetPlatform();
 
+    helperMock.resolvePdsForHandle.mockResolvedValue({
+      did: 'did:plc:bot123',
+      pdsUrl: 'https://pds.example.com',
+    });
+
     helperMock.createSession.mockResolvedValue({
       did: 'did:plc:bot123',
       handle: 'renovate-bot.bsky.social',
@@ -123,26 +128,37 @@ describe('modules/platform/tangled/index', () => {
       });
 
       expect(result).toEqual({
-        endpoint: 'https://bsky.social',
+        endpoint: 'https://tangled.org/',
         renovateUsername: 'renovate-bot.bsky.social',
         gitAuthor: 'Renovate Bot <renovate@example.com>',
       });
     });
 
-    it('should use custom endpoint', async () => {
+    it('should resolve the PDS from the handle', async () => {
       const result = await tangled.initPlatform({
-        endpoint: 'https://custom-pds.example.com',
         username: 'user',
         password: 'pass',
         gitAuthor: 'User <user@example.com>',
       });
 
-      expect(result.endpoint).toBe('https://custom-pds.example.com');
+      expect(helperMock.resolvePdsForHandle).toHaveBeenCalledWith('user');
+      expect(result.endpoint).toBe('https://tangled.org/');
       expect(helperMock.createSession).toHaveBeenCalledWith(
-        'https://custom-pds.example.com',
+        'https://pds.example.com',
         'user',
         'pass',
       );
+    });
+
+    it('should use custom endpoint as the Tangled base URL', async () => {
+      const result = await tangled.initPlatform({
+        endpoint: 'https://custom-tangled.example.com',
+        username: 'user',
+        password: 'pass',
+        gitAuthor: 'User <user@example.com>',
+      });
+
+      expect(result.endpoint).toBe('https://custom-tangled.example.com/');
     });
 
     it('should throw on auth failure', async () => {
@@ -151,6 +167,17 @@ describe('modules/platform/tangled/index', () => {
         tangled.initPlatform({
           username: 'user',
           password: 'bad',
+          gitAuthor: 'User <user@example.com>',
+        }),
+      ).rejects.toThrow('Authentication failure');
+    });
+
+    it('should throw when the PDS cannot be resolved', async () => {
+      helperMock.resolvePdsForHandle.mockRejectedValueOnce(new Error('nope'));
+      await expect(
+        tangled.initPlatform({
+          username: 'user',
+          password: 'pass',
           gitAuthor: 'User <user@example.com>',
         }),
       ).rejects.toThrow('Authentication failure');
@@ -178,7 +205,7 @@ describe('modules/platform/tangled/index', () => {
       );
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: 'git@knot.example.com:did:plc:owner/my-repo',
+          url: 'git@tangled.org:did:plc:owner/my-repo',
           defaultBranch: 'main',
         }),
       );
@@ -248,7 +275,7 @@ describe('modules/platform/tangled/index', () => {
       );
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: 'git@knot.example.com:did:plc:owner/my-repo',
+          url: 'git@tangled.org:did:plc:owner/my-repo',
         }),
       );
     });
@@ -258,7 +285,7 @@ describe('modules/platform/tangled/index', () => {
 
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: 'git@knot.example.com:did:plc:owner/tid456',
+          url: 'git@tangled.org:did:plc:owner/tid456',
         }),
       );
     });
@@ -268,7 +295,24 @@ describe('modules/platform/tangled/index', () => {
 
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: 'git@knot.example.com:did:plc:owner/my-repo',
+          url: 'git@tangled.org:did:plc:owner/my-repo',
+        }),
+      );
+    });
+
+    it('should use the configured Tangled base URL for SSH', async () => {
+      await tangled.initPlatform({
+        endpoint: 'https://custom-tangled.example.com',
+        username: 'user',
+        password: 'pass',
+        gitAuthor: 'User <user@example.com>',
+      });
+
+      await initFakeRepo();
+
+      expect(git.initRepo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'git@custom-tangled.example.com:did:plc:owner/my-repo',
         }),
       );
     });

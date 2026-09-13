@@ -4,6 +4,7 @@ import type { BranchStatus } from '../../../types/index.ts';
 import { parseJson } from '../../../util/common.ts';
 import * as git from '../../../util/git/index.ts';
 import { sanitize } from '../../../util/sanitize.ts';
+import { ensureTrailingSlash } from '../../../util/url.ts';
 import type {
   BranchStatusConfig,
   CreatePRConfig,
@@ -25,9 +26,15 @@ import type {
 import { repoFingerprint } from '../util.ts';
 import * as helper from './tangled-helper.ts';
 import type { TangledPull, TangledRepoConfig } from './types.ts';
-import { tidToNumber, toRenovatePr } from './utils.ts';
+import { getSshHostFromBaseUrl, tidToNumber, toRenovatePr } from './utils.ts';
 
 export const id = 'tangled';
+
+const defaults = {
+  endpoint: 'https://tangled.org/',
+};
+
+let sshHost = '';
 
 let config: TangledRepoConfig = {} as any;
 let cachedPrList: Pr[] | null = null;
@@ -37,6 +44,8 @@ const prNumberToUri = new Map<number, string>();
 const prNumberToRkey = new Map<number, string>();
 
 export function resetPlatform(): void {
+  defaults.endpoint = 'https://tangled.org/';
+  sshHost = '';
   config = {} as any;
   cachedPrList = null;
   prNumberToUri.clear();
@@ -93,13 +102,16 @@ const platform: Platform = {
       throw new Error('Init: You must configure gitAuthor for Tangled');
     }
 
-    // Resolve handle to determine PDS service URL
-    // AT Protocol handles can be on any PDS, so we use the handle to find it
-    const pdsService = endpoint ?? 'https://bsky.social';
+    // The endpoint is the Tangled base URL used to derive the SSH host.
+    // HTTP XRPC calls still go directly to the repository's knot.
+    defaults.endpoint = ensureTrailingSlash(endpoint ?? defaults.endpoint);
+    sshHost = getSshHostFromBaseUrl(defaults.endpoint);
 
+    // Resolve the bot account's handle to its PDS, so no PDS config is needed
     let sessionInfo: { did: string; handle: string; pdsUrl: string };
     try {
-      sessionInfo = await helper.createSession(pdsService, username, password);
+      const { pdsUrl } = await helper.resolvePdsForHandle(username);
+      sessionInfo = await helper.createSession(pdsUrl, username, password);
     } catch (err) {
       logger.debug({ err }, 'Error authenticating with AT Protocol PDS');
       throw new Error('Init: Authentication failure');
@@ -111,7 +123,7 @@ const platform: Platform = {
     );
 
     return {
-      endpoint: pdsService,
+      endpoint: defaults.endpoint,
       renovateUsername: sessionInfo.handle,
       gitAuthor,
     };
@@ -200,8 +212,8 @@ const platform: Platform = {
       'Tangled repo initialized',
     );
 
-    // Initialize git with SSH URL
-    const sshUrl = `git@${repoRef.knot}:${ownerDid}/${config.knotRkey}`;
+    // Initialize git with SSH URL, always via the Tangled base URL host.
+    const sshUrl = `git@${sshHost}:${ownerDid}/${config.knotRkey}`;
     await git.initRepo({
       url: sshUrl,
       defaultBranch: config.defaultBranch,

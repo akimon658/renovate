@@ -1,4 +1,5 @@
 import type { LongCommitSha } from '../../../util/schema-utils/git.ts';
+import { createURLFromHostOrURL } from '../../../util/url.ts';
 import { getPrBodyStruct } from '../pr-body.ts';
 import type { Pr } from '../types.ts';
 import type { TangledPull } from './types.ts';
@@ -30,6 +31,19 @@ export function tidToNumber(tid: string): number {
  */
 export function rkeyFromUri(uri: string): string {
   return uri.split('/').pop()!;
+}
+
+/**
+ * Derive the SSH host for a Tangled base URL.
+ *
+ * Accepts a full URL or a bare hostname, ignoring any path or port.
+ */
+export function getSshHostFromBaseUrl(baseUrl: string): string {
+  const parsed = createURLFromHostOrURL(baseUrl);
+  if (!parsed) {
+    throw new Error(`Invalid Tangled endpoint: ${baseUrl}`);
+  }
+  return parsed.hostname;
 }
 
 /**

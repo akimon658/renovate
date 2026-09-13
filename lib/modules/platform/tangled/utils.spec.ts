@@ -1,6 +1,11 @@
 import { getPrBodyStruct } from '../pr-body.ts';
 import type { TangledPull } from './types.ts';
-import { rkeyFromUri, tidToNumber, toRenovatePr } from './utils.ts';
+import {
+  getSshHostFromBaseUrl,
+  rkeyFromUri,
+  tidToNumber,
+  toRenovatePr,
+} from './utils.ts';
 
 describe('modules/platform/tangled/utils', () => {
   describe('tidToNumber', () => {
@@ -46,6 +51,28 @@ describe('modules/platform/tangled/utils', () => {
 
     it('handles URI with trailing slash', () => {
       expect(rkeyFromUri('at://did:plc:abc123/collection/')).toBe('');
+    });
+  });
+
+  describe('getSshHostFromBaseUrl', () => {
+    it('extracts the hostname from a full URL', () => {
+      expect(getSshHostFromBaseUrl('https://tangled.org')).toBe('tangled.org');
+    });
+
+    it('ignores path, port and trailing slash', () => {
+      expect(getSshHostFromBaseUrl('https://knot.example.com:3000/foo/')).toBe(
+        'knot.example.com',
+      );
+    });
+
+    it('accepts a bare hostname', () => {
+      expect(getSshHostFromBaseUrl('tangled.org')).toBe('tangled.org');
+    });
+
+    it('throws for an invalid base URL', () => {
+      expect(() => getSshHostFromBaseUrl('')).toThrow(
+        'Invalid Tangled endpoint',
+      );
     });
   });
 
