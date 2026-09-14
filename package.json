@@ -65,6 +65,7 @@
     "type-check": "run-s 'generate:*' 'tsc --noEmit {@}' --",
     "update-static-data": "run-s 'update-static-data:*'",
     "update-static-data:distro-info": "node tools/static-data/generate-distro-info.mjs",
+    "update-static-data:java-lts-versions": "node tools/static-data/generate-java-lts-versions.ts",
     "update-static-data:lambda-node-schedule": "node tools/static-data/generate-lambda-node-schedule.mjs",
     "update-static-data:mise-registry": "node tools/static-data/generate-mise-registry.ts",
     "update-static-data:node-schedule": "node tools/static-data/generate-node-schedule.mjs"
@@ -244,7 +245,7 @@
     "moo": "0.5.3",
     "ms": "2.1.3",
     "neotraverse": "1.0.1",
-    "node-html-parser": "9.0.3",
+    "node-html-parser": "9.0.4",
     "p-all": "5.0.1",
     "p-map": "7.0.7",
     "p-queue": "9.3.3",
@@ -359,7 +360,7 @@
     "vitest-mock-extended": "5.1.1",
     "yazl": "3.3.1"
   },
-  "packageManager": "pnpm@11.25.0",
+  "packageManager": "pnpm@11.26.0",
   "files": [
     "dist",
     "renovate-schema.json"
