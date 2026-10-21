@@ -58,3 +58,15 @@ export interface TangledLabelOperand {
   key: string;
   value: string;
 }
+
+/**
+ * Result of syncing a pull request's latest round with its source branch.
+ */
+export interface ResubmitPullResult {
+  /** Whether the branch diff differs from the PR's latest round. */
+  changed: boolean;
+  /** Whether a new round was written (always false in dry-run mode). */
+  resubmitted: boolean;
+  /** Index of the latest round (0-based), or null when there are no rounds. */
+  round: number | null;
+}

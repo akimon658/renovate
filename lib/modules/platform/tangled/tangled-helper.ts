@@ -1,3 +1,4 @@
+import { gunzipSync, gzipSync } from 'node:zlib';
 import type {} from '@atcute/atproto';
 import { Client, ok, simpleFetchHandler } from '@atcute/client';
 import { PasswordSession } from '@atcute/password-session';
@@ -13,6 +14,7 @@ import { coerceArray } from '../../../util/array.ts';
 import { TangledHttp } from '../../../util/http/tangled.ts';
 import { ensureTrailingSlash, getQueryString } from '../../../util/url.ts';
 import type {
+  ResubmitPullResult,
   TangledLabel,
   TangledLabelOperand,
   TangledPull,
@@ -247,12 +249,12 @@ export async function createPullRecord(
 }
 
 /**
- * Update a pull request record (title/body).
+ * Read one of the bot's own pull request records, returning the record and its
+ * current CID (used as a compare-and-swap precondition on writes).
  */
-export async function updatePullRecord(
+async function getPullRecord(
   rkey: string,
-  updates: { title?: string; body?: string },
-): Promise<void> {
+): Promise<{ record: ShTangledRepoPull.Main; cid: string | undefined }> {
   if (!pdsClient) {
     throw new Error('Not authenticated');
   }
@@ -267,12 +269,26 @@ export async function updatePullRecord(
     }),
   );
 
-  const record = existing.value as ShTangledRepoPull.Main;
-  if (updates.title !== undefined) {
-    record.title = updates.title;
-  }
-  if (updates.body !== undefined) {
-    record.body = updates.body || undefined;
+  return {
+    record: existing.value as ShTangledRepoPull.Main,
+    cid: existing.cid,
+  };
+}
+
+/**
+ * Write a pull request record back to the bot's PDS.
+ *
+ * When `swapRecord` is given, the write only succeeds if the stored record
+ * still has that CID, so a concurrent writer cannot silently clobber changes.
+ */
+async function putPullRecord(
+  rkey: string,
+  record: ShTangledRepoPull.Main,
+  swapRecord?: string,
+): Promise<void> {
+  /* v8 ignore next -- unreachable: callers read the record first, which authenticates */
+  if (!pdsClient) {
+    throw new Error('Not authenticated');
   }
 
   await ok(
@@ -282,9 +298,149 @@ export async function updatePullRecord(
         collection: 'sh.tangled.repo.pull' as any,
         rkey: rkey as any,
         record,
+        ...(swapRecord ? { swapRecord: swapRecord as any } : {}),
       },
     }),
   );
+}
+
+/**
+ * Returns whether an error is an AT Protocol `InvalidSwap` response, meaning
+ * the record was modified since it was read.
+ */
+function isInvalidSwap(err: unknown): boolean {
+  return isObject(err) && (err as { error?: string }).error === 'InvalidSwap';
+}
+
+/**
+ * Update a pull request record (title/body).
+ */
+export async function updatePullRecord(
+  rkey: string,
+  updates: { title?: string; body?: string },
+): Promise<void> {
+  // Retry once when another writer changed the record between our read and
+  // write, so the update is not lost.
+  for (let attempt = 0; ; attempt++) {
+    const { record, cid } = await getPullRecord(rkey);
+
+    if (updates.title !== undefined) {
+      record.title = updates.title;
+    }
+    if (updates.body !== undefined) {
+      record.body = updates.body || undefined;
+    }
+
+    try {
+      await putPullRecord(rkey, record, cid);
+      return;
+    } catch (err) {
+      if (attempt > 0 || !isInvalidSwap(err)) {
+        throw err;
+      }
+      logger.debug(
+        { err, rkey },
+        'Pull request record changed concurrently, retrying update',
+      );
+    }
+  }
+}
+
+/**
+ * Read the format-patch stored in a pull request round.
+ *
+ * Blob data lives on the bot's PDS and is fetched through the public
+ * `com.atproto.sync.getBlob` endpoint.
+ */
+async function getStoredPatch(
+  round: ShTangledRepoPull.Round | undefined,
+): Promise<string | null> {
+  const cid = (round?.patchBlob as { ref?: { $link?: string } } | undefined)
+    ?.ref?.$link;
+  const pdsUrl = session?.dispatchUrl;
+  if (!cid || !pdsUrl) {
+    return null;
+  }
+
+  const query = getQueryString({ did: botDid, cid });
+  const url = `${ensureTrailingSlash(pdsUrl)}xrpc/com.atproto.sync.getBlob?${query}`;
+  try {
+    const res = await tangledHttp.getBuffer(url);
+    return gunzipSync(Buffer.from(res.body)).toString('utf-8');
+  } catch (err) {
+    logger.debug({ err, cid }, 'Failed to read stored pull request patch');
+    return null;
+  }
+}
+
+/**
+ * Sync a pull request's latest round with the current source branch.
+ *
+ * Tangled pull requests are snapshots: pushing to the source branch does not
+ * update the diff reviewers see. Resubmitting appends a new round containing a
+ * fresh format-patch of the current branch. This is a no-op when the latest
+ * round already represents the branch, so it is safe to call on every run.
+ */
+export async function resubmitPull(
+  knotHost: string,
+  repoDid: string,
+  targetBranch: string,
+  sourceBranch: string,
+  rkey: string,
+  dryRun = false,
+): Promise<ResubmitPullResult> {
+  const patch = await compare(knotHost, repoDid, targetBranch, sourceBranch);
+
+  // Upload the patch once so retries reuse the same blob.
+  let blobRef:
+    { ref: { $link: string }; mimeType: string; size: number } | undefined;
+
+  // Retry once when another writer changed the record between our read and
+  // write, so the new round is not lost.
+  for (let attempt = 0; ; attempt++) {
+    const { record, cid } = await getPullRecord(rkey);
+    const rounds = coerceArray(record.rounds);
+
+    // Skip when the latest round already represents the current branch.
+    const storedPatch = await getStoredPatch(rounds.at(-1));
+    if (storedPatch === patch) {
+      return {
+        changed: false,
+        resubmitted: false,
+        round: rounds.length ? rounds.length - 1 : null,
+      };
+    }
+
+    if (dryRun) {
+      return {
+        changed: true,
+        resubmitted: false,
+        round: rounds.length ? rounds.length - 1 : null,
+      };
+    }
+
+    blobRef ??= await uploadBlob(gzipSync(Buffer.from(patch, 'utf-8')));
+    const updated: ShTangledRepoPull.Main = {
+      ...record,
+      rounds: [
+        ...rounds,
+        { patchBlob: blobRef as any, createdAt: DateTime.utc().toISO() },
+      ],
+    };
+
+    try {
+      await putPullRecord(rkey, updated, cid);
+      return { changed: true, resubmitted: true, round: rounds.length };
+    } catch (err) {
+      if (attempt > 0 || !isInvalidSwap(err)) {
+        throw err;
+      }
+      logger.debug(
+        { err, rkey },
+        'Pull request record changed concurrently, retrying resubmit',
+      );
+    }
+  }
 }
 
 /**

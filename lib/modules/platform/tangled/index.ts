@@ -1,4 +1,6 @@
+import { gzipSync } from 'node:zlib';
 import { DateTime } from 'luxon';
+import { GlobalConfig } from '../../../config/global.ts';
 import { logger } from '../../../logger/index.ts';
 import type { BranchStatus } from '../../../types/index.ts';
 import { coerceArray } from '../../../util/array.ts';
@@ -360,7 +362,6 @@ const platform: Platform = {
     );
 
     // Step 2: Compress the patch and upload as a blob
-    const { gzipSync } = await import('node:zlib');
     const gzipped = gzipSync(Buffer.from(patch, 'utf-8'));
     const blobRef = await helper.uploadBlob(gzipped);
 
@@ -433,6 +434,60 @@ const platform: Platform = {
 
     // Invalidate cache
     cachedPrList = null;
+  },
+
+  /**
+   * Sync the PR's latest round with the source branch after it was updated.
+   *
+   * Tangled pull requests are patch snapshots, so pushing to the source branch
+   * does not update what reviewers see. Resubmitting appends a new round when
+   * the branch diff changed, which is what makes rebases visible on the PR.
+   */
+  async refreshPr(number: number): Promise<void> {
+    logger.debug(`refreshPr(${number})`);
+    const rkey = prNumberToRkey.get(number);
+    const uri = prNumberToUri.get(number);
+    if (!rkey || !uri) {
+      logger.warn(
+        { number },
+        'Cannot refresh PR - rkey/uri not found in cache',
+      );
+      return;
+    }
+
+    const pr = await platform.getPr(number);
+    if (pr?.state !== 'open') {
+      return;
+    }
+    // Fork-based PRs cannot be compared against the target knot
+    if (pr.sourceRepo && pr.sourceRepo !== config.repoDid) {
+      logger.debug({ number }, 'Skipping refresh of fork-based PR');
+      return;
+    }
+
+    try {
+      const result = await helper.resubmitPull(
+        config.knotHost,
+        config.repoDid,
+        pr.targetBranch!,
+        pr.sourceBranch,
+        rkey,
+        !!GlobalConfig.get('dryRun'),
+      );
+      if (result.changed) {
+        if (result.resubmitted) {
+          logger.info(
+            { prNumber: number, round: result.round },
+            'Resubmitted pull request on Tangled',
+          );
+          cachedPrList = null;
+        } else {
+          logger.info(`DRY-RUN: Would resubmit PR #${number} on Tangled`);
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, number }, 'Failed to resubmit PR');
+    }
   },
 
   async mergePr({ id: number }: MergePRConfig): Promise<boolean> {
@@ -614,6 +669,7 @@ export const {
   massageMarkdown,
   maxBodyLength,
   mergePr,
+  refreshPr,
   setBranchStatus,
   updatePr,
 } = platform;
