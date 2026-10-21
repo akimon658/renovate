@@ -1,5 +1,9 @@
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
+
 const mockGet = vi.fn();
 const mockPost = vi.fn();
+const gzipAsync = promisify(gzip);
 const httpMocks = vi.hoisted(() => ({
   getJsonUnchecked: vi.fn(),
   getText: vi.fn(),
@@ -42,6 +46,10 @@ function recordNotFound(): Error {
   return Object.assign(new Error('Record not found'), {
     error: 'RecordNotFound',
   });
+}
+
+function invalidSwap(): Error {
+  return Object.assign(new Error('InvalidSwap'), { error: 'InvalidSwap' });
 }
 
 describe('modules/platform/tangled/tangled-helper', () => {
@@ -431,6 +439,325 @@ describe('modules/platform/tangled/tangled-helper', () => {
         body: undefined,
       });
       expect(input.record.body).toBeUndefined();
+    });
+
+    it('uses the record CID as a compare-and-swap precondition', async () => {
+      await authenticate();
+      mockGet.mockResolvedValueOnce({
+        cid: 'bafyold',
+        value: { title: 'old title' },
+      });
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.updatePullRecord('rkey', { title: 'new title' });
+
+      const { input } = mockPost.mock.calls[0][1];
+      expect(input.swapRecord).toBe('bafyold');
+    });
+
+    it('retries once when the record changed concurrently', async () => {
+      await authenticate();
+      mockGet
+        .mockResolvedValueOnce({ cid: 'bafyold', value: { title: 'old' } })
+        .mockResolvedValueOnce({ cid: 'bafynew', value: { title: 'old' } });
+      mockPost.mockRejectedValueOnce(invalidSwap()).mockResolvedValueOnce({});
+
+      await helper.updatePullRecord('rkey', { title: 'new title' });
+
+      expect(mockPost).toHaveBeenCalledTimes(2);
+      expect(mockPost.mock.calls[1][1].input.swapRecord).toBe('bafynew');
+    });
+
+    it('throws when the record keeps changing concurrently', async () => {
+      await authenticate();
+      mockGet.mockResolvedValue({ cid: 'bafyold', value: { title: 'old' } });
+      mockPost.mockRejectedValue(invalidSwap());
+
+      await expect(
+        helper.updatePullRecord('rkey', { title: 'new title' }),
+      ).rejects.toThrow('InvalidSwap');
+
+      expect(mockPost).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('resubmitPull', () => {
+    const patch = 'From abc Mon Sep 17 00:00:00 2001\n\n---\n foo | 1 +\n';
+
+    function pullRecord(rounds?: unknown[]): object {
+      return {
+        $type: 'sh.tangled.repo.pull',
+        title: 'title',
+        target: { repo: 'did:plc:repo', branch: 'main' },
+        source: { branch: 'renovate/foo-2.x' },
+        rounds: rounds ?? [
+          {
+            patchBlob: {
+              $type: 'blob',
+              ref: { $link: 'bafystored' },
+              mimeType: 'application/gzip',
+              size: 100,
+            },
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        ],
+        createdAt: '2025-01-01T00:00:00.000Z',
+      };
+    }
+
+    async function gzipped(value: string): Promise<{ body: Uint8Array }> {
+      return { body: await gzipAsync(Buffer.from(value, 'utf-8')) };
+    }
+
+    it('does nothing when the latest round matches the branch', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
+      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped(patch));
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).resolves.toEqual({ changed: false, resubmitted: false, round: 0 });
+
+      expect(httpMocks.getBuffer).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'https://pds.example.com/xrpc/com.atproto.sync.getBlob?',
+        ),
+      );
+      expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('appends a new round when the branch diff changed', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({
+        cid: 'bafycid',
+        value: pullRecord(),
+      });
+      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
+      mockPost
+        .mockResolvedValueOnce({
+          blob: {
+            ref: { $link: 'bafynewblob' },
+            mimeType: 'application/gzip',
+            size: 120,
+          },
+        })
+        .mockResolvedValueOnce({});
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
+
+      expect(mockPost.mock.calls[0][0]).toBe('com.atproto.repo.uploadBlob');
+      const { input } = mockPost.mock.calls[1][1];
+      expect(input.swapRecord).toBe('bafycid');
+      expect(input.record.rounds).toHaveLength(2);
+      expect(input.record.rounds[1]).toMatchObject({
+        patchBlob: { ref: { $link: 'bafynewblob' } },
+      });
+      expect(input.record.title).toBe('title');
+      expect(input.record.target).toEqual({
+        repo: 'did:plc:repo',
+        branch: 'main',
+      });
+    });
+
+    it('writes nothing in dry-run mode', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
+      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+          true,
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: false, round: 0 });
+
+      expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('resubmits when the stored patch cannot be read', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
+      httpMocks.getBuffer.mockRejectedValueOnce(new Error('blob not found'));
+      mockPost
+        .mockResolvedValueOnce({
+          blob: {
+            ref: { $link: 'bafynewblob' },
+            mimeType: 'application/gzip',
+            size: 120,
+          },
+        })
+        .mockResolvedValueOnce({});
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
+    });
+
+    it('resubmits when the record has no rounds', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord([]) });
+      mockPost
+        .mockResolvedValueOnce({
+          blob: {
+            ref: { $link: 'bafynewblob' },
+            mimeType: 'application/gzip',
+            size: 120,
+          },
+        })
+        .mockResolvedValueOnce({});
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: true, round: 0 });
+
+      expect(httpMocks.getBuffer).not.toHaveBeenCalled();
+    });
+
+    it('retries once when the record changed concurrently', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet
+        .mockResolvedValueOnce({ cid: 'bafyold', value: pullRecord() })
+        .mockResolvedValueOnce({ cid: 'bafynew', value: pullRecord() });
+      httpMocks.getBuffer.mockResolvedValue(await gzipped('old patch'));
+      const blob = {
+        blob: {
+          ref: { $link: 'bafynewblob' },
+          mimeType: 'application/gzip',
+          size: 120,
+        },
+      };
+      mockPost
+        .mockResolvedValueOnce(blob)
+        .mockRejectedValueOnce(invalidSwap())
+        .mockResolvedValueOnce({});
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
+
+      expect(mockPost).toHaveBeenCalledTimes(3);
+      expect(
+        mockPost.mock.calls.filter(
+          ([method]) => method === 'com.atproto.repo.uploadBlob',
+        ),
+      ).toHaveLength(1);
+      expect(mockPost.mock.calls[2][1].input.swapRecord).toBe('bafynew');
+    });
+
+    it('propagates compare failures', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockRejectedValueOnce(new Error('no branch'));
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).rejects.toThrow('no branch');
+    });
+
+    it('propagates unexpected write failures', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
+      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
+      mockPost
+        .mockResolvedValueOnce({
+          blob: {
+            ref: { $link: 'bafynewblob' },
+            mimeType: 'application/gzip',
+            size: 120,
+          },
+        })
+        .mockRejectedValueOnce(new Error('boom'));
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).rejects.toThrow('boom');
+
+      expect(mockPost).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws when the record keeps changing concurrently', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
+      mockGet.mockResolvedValue({ cid: 'bafycid', value: pullRecord() });
+      httpMocks.getBuffer.mockResolvedValue(await gzipped('old patch'));
+      mockPost.mockImplementation((method: string) => {
+        if (method === 'com.atproto.repo.uploadBlob') {
+          return Promise.resolve({
+            blob: {
+              ref: { $link: 'bafynewblob' },
+              mimeType: 'application/gzip',
+              size: 120,
+            },
+          });
+        }
+        return Promise.reject(invalidSwap());
+      });
+
+      await expect(
+        helper.resubmitPull(
+          'knot.example.com',
+          'did:plc:repo',
+          'main',
+          'renovate/foo-2.x',
+          'rkey',
+        ),
+      ).rejects.toThrow('InvalidSwap');
+
+      expect(mockPost).toHaveBeenCalledTimes(3);
     });
   });
 

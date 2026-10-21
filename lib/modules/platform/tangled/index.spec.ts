@@ -1,6 +1,7 @@
 import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import { git } from '~test/util.ts';
+import { GlobalConfig } from '../../../config/global.ts';
 import { repoFingerprint } from '../util.ts';
 import * as tangled from './index.ts';
 import * as helper from './tangled-helper.ts';
@@ -54,8 +55,15 @@ function mockPull(overrides?: Partial<TangledPull>): TangledPull {
 describe('modules/platform/tangled/index', () => {
   beforeEach(async () => {
     tangled.resetPlatform();
+    GlobalConfig.reset();
 
     helperMock.getLabels.mockResolvedValue([]);
+
+    helperMock.resubmitPull.mockResolvedValue({
+      changed: false,
+      resubmitted: false,
+      round: 0,
+    });
 
     helperMock.resolvePdsForHandle.mockResolvedValue({
       did: 'did:plc:bot123',
@@ -782,6 +790,109 @@ describe('modules/platform/tangled/index', () => {
 
       expect(helperMock.updatePullRecord).not.toHaveBeenCalled();
       expect(helperMock.setPullStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('refreshPr()', () => {
+    it('resubmits the PR when the branch diff changed', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+      helperMock.resubmitPull.mockResolvedValueOnce({
+        changed: true,
+        resubmitted: true,
+        round: 1,
+      });
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+        'main',
+        'renovate/foo-2.x',
+        mockRkey,
+        false,
+      );
+    });
+
+    it('does not write when the PR already matches the branch', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips PRs that are not open', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([
+        mockPull({ status: 'closed' }),
+      ]);
+      await tangled.getPrList();
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).not.toHaveBeenCalled();
+    });
+
+    it('skips fork-based PRs', async () => {
+      await initFakeRepo();
+      const pull = mockPull();
+      pull.record.source = {
+        branch: 'renovate/foo-2.x',
+        repo: 'did:plc:forkrepo',
+      };
+      helperMock.listPullRecords.mockResolvedValueOnce([pull]);
+      await tangled.getPrList();
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).not.toHaveBeenCalled();
+    });
+
+    it('warns when the PR is unknown', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([]);
+      await tangled.getPrList();
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).not.toHaveBeenCalled();
+    });
+
+    it('passes the dry-run flag through', async () => {
+      await initFakeRepo();
+      GlobalConfig.set({ dryRun: 'full' });
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+      helperMock.resubmitPull.mockResolvedValueOnce({
+        changed: true,
+        resubmitted: false,
+        round: 0,
+      });
+
+      await tangled.refreshPr!(mockPrNumber);
+
+      expect(helperMock.resubmitPull).toHaveBeenCalledWith(
+        'knot.example.com',
+        'did:plc:repo123',
+        'main',
+        'renovate/foo-2.x',
+        mockRkey,
+        true,
+      );
+    });
+
+    it('does not throw when resubmitting fails', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+      helperMock.resubmitPull.mockRejectedValueOnce(new Error('knot error'));
+
+      await expect(tangled.refreshPr!(mockPrNumber)).resolves.toBeUndefined();
     });
   });
 
