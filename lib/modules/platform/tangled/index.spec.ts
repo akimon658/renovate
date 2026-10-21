@@ -55,6 +55,8 @@ describe('modules/platform/tangled/index', () => {
   beforeEach(async () => {
     tangled.resetPlatform();
 
+    helperMock.getLabels.mockResolvedValue([]);
+
     helperMock.resolvePdsForHandle.mockResolvedValue({
       did: 'did:plc:bot123',
       pdsUrl: 'https://pds.example.com',
@@ -123,6 +125,52 @@ describe('modules/platform/tangled/index', () => {
       ).rejects.toThrow('gitAuthor');
     });
 
+    it('should throw on invalid tangledAppviewUrl', async () => {
+      await expect(
+        tangled.initPlatform({
+          username: 'user',
+          password: 'pass',
+          gitAuthor: 'User <user@example.com>',
+          tangledAppviewUrl: 'api.tangled.org',
+        }),
+      ).rejects.toThrow('Invalid tangledAppviewUrl');
+    });
+
+    it('should throw on invalid tangledSshHost', async () => {
+      await expect(
+        tangled.initPlatform({
+          username: 'user',
+          password: 'pass',
+          gitAuthor: 'User <user@example.com>',
+          tangledSshHost: 'git@knot.example.com',
+        }),
+      ).rejects.toThrow('Invalid tangledSshHost');
+    });
+
+    it('should throw on invalid tangledSshPort', async () => {
+      await expect(
+        tangled.initPlatform({
+          username: 'user',
+          password: 'pass',
+          gitAuthor: 'User <user@example.com>',
+          tangledSshPort: 0,
+        }),
+      ).rejects.toThrow('Invalid tangledSshPort');
+    });
+
+    it('should apply custom tangled settings', async () => {
+      const result = await tangled.initPlatform({
+        username: 'user',
+        password: 'pass',
+        gitAuthor: 'User <user@example.com>',
+        tangledAppviewUrl: 'https://bobbin.example.com',
+        tangledSshHost: 'knot.example.com',
+        tangledSshPort: 2222,
+      });
+
+      expect(result.endpoint).toBe('https://bobbin.example.com/');
+    });
+
     it('should authenticate and return platform info', async () => {
       const result = await tangled.initPlatform({
         username: 'renovate-bot.bsky.social',
@@ -131,7 +179,7 @@ describe('modules/platform/tangled/index', () => {
       });
 
       expect(result).toEqual({
-        endpoint: 'https://tangled.org/',
+        endpoint: 'https://api.tangled.org/',
         renovateUsername: 'renovate-bot.bsky.social',
         gitAuthor: 'Renovate Bot <renovate@example.com>',
       });
@@ -145,7 +193,7 @@ describe('modules/platform/tangled/index', () => {
       });
 
       expect(helperMock.resolvePdsForHandle).toHaveBeenCalledWith('user');
-      expect(result.endpoint).toBe('https://tangled.org/');
+      expect(result.endpoint).toBe('https://api.tangled.org/');
       expect(helperMock.createSession).toHaveBeenCalledWith(
         'https://pds.example.com',
         'user',
@@ -153,7 +201,7 @@ describe('modules/platform/tangled/index', () => {
       );
     });
 
-    it('should use custom endpoint as the Tangled base URL', async () => {
+    it('should ignore the generic endpoint option', async () => {
       const result = await tangled.initPlatform({
         endpoint: 'https://custom-tangled.example.com',
         username: 'user',
@@ -161,7 +209,7 @@ describe('modules/platform/tangled/index', () => {
         gitAuthor: 'User <user@example.com>',
       });
 
-      expect(result.endpoint).toBe('https://custom-tangled.example.com/');
+      expect(result.endpoint).toBe('https://api.tangled.org/');
     });
 
     it('should throw on auth failure', async () => {
@@ -303,19 +351,37 @@ describe('modules/platform/tangled/index', () => {
       );
     });
 
-    it('should use the configured Tangled base URL for SSH', async () => {
+    it('should use the configured SSH host for git operations', async () => {
       await tangled.initPlatform({
-        endpoint: 'https://custom-tangled.example.com',
         username: 'user',
         password: 'pass',
         gitAuthor: 'User <user@example.com>',
+        tangledSshHost: 'knot.example.com',
       });
 
       await initFakeRepo();
 
       expect(git.initRepo).toHaveBeenCalledWith(
         expect.objectContaining({
-          url: 'git@custom-tangled.example.com:did:plc:owner/my-repo',
+          url: 'git@knot.example.com:did:plc:owner/my-repo',
+        }),
+      );
+    });
+
+    it('should use an ssh:// URL for a non-default SSH port', async () => {
+      await tangled.initPlatform({
+        username: 'user',
+        password: 'pass',
+        gitAuthor: 'User <user@example.com>',
+        tangledSshHost: 'knot.example.com',
+        tangledSshPort: 2222,
+      });
+
+      await initFakeRepo();
+
+      expect(git.initRepo).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'ssh://git@knot.example.com:2222/did:plc:owner/my-repo',
         }),
       );
     });
@@ -451,6 +517,34 @@ describe('modules/platform/tangled/index', () => {
       const list = await tangled.getPrList();
       expect(list).toHaveLength(1);
       expect(list[0].number).toBe(mockPrNumber);
+    });
+
+    it('enriches open PRs with labels from the appview', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      helperMock.getLabels.mockResolvedValueOnce([
+        {
+          key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+          value: 'null',
+          name: 'rebase',
+        },
+      ]);
+
+      const list = await tangled.getPrList();
+      expect(list[0].labels).toEqual(['rebase']);
+      expect(helperMock.getLabels).toHaveBeenCalledWith(
+        'https://api.tangled.org/',
+        expect.stringContaining('sh.tangled.repo.pull'),
+      );
+    });
+
+    it('ignores label lookup failures', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      helperMock.getLabels.mockRejectedValueOnce(new Error('appview down'));
+
+      const list = await tangled.getPrList();
+      expect(list[0].labels).toBeUndefined();
     });
   });
 
@@ -785,6 +879,67 @@ describe('modules/platform/tangled/index', () => {
     });
   });
 
+  describe('deleteLabel()', () => {
+    it('warns when the PR is unknown', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([]);
+      await tangled.getPrList();
+
+      await expect(tangled.deleteLabel(999, 'rebase')).resolves.toBeUndefined();
+      expect(helperMock.createLabelOp).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when the label is not applied', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      await tangled.getPrList();
+
+      await tangled.deleteLabel(mockPrNumber, 'rebase');
+
+      expect(helperMock.createLabelOp).not.toHaveBeenCalled();
+    });
+
+    it('removes an applied label', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      helperMock.getLabels.mockResolvedValueOnce([
+        {
+          key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+          value: 'null',
+          name: 'rebase',
+        },
+      ]);
+      await tangled.getPrList();
+
+      await tangled.deleteLabel(mockPrNumber, 'rebase');
+
+      expect(helperMock.createLabelOp).toHaveBeenCalledWith(
+        `at://did:plc:bot/sh.tangled.repo.pull/${mockRkey}`,
+        [],
+        [
+          {
+            key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+            value: 'null',
+          },
+        ],
+      );
+    });
+
+    it('swallows label op failures', async () => {
+      await initFakeRepo();
+      helperMock.listPullRecords.mockResolvedValueOnce([mockPull()]);
+      helperMock.getLabels.mockResolvedValueOnce([
+        { key: 'definition', value: 'null', name: 'rebase' },
+      ]);
+      await tangled.getPrList();
+      helperMock.createLabelOp.mockRejectedValueOnce(new Error('nope'));
+
+      await expect(
+        tangled.deleteLabel(mockPrNumber, 'rebase'),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('getBranchStatus()', () => {
     it('should return green', async () => {
       const status = await tangled.getBranchStatus('branch', true);
@@ -817,10 +972,6 @@ describe('modules/platform/tangled/index', () => {
 
     it('addAssignees resolves', async () => {
       await expect(tangled.addAssignees(1, ['user'])).resolves.toBeUndefined();
-    });
-
-    it('deleteLabel resolves', async () => {
-      await expect(tangled.deleteLabel(1, 'label')).resolves.toBeUndefined();
     });
 
     it('findIssue returns null', async () => {
@@ -863,8 +1014,29 @@ describe('modules/platform/tangled/index', () => {
       ).resolves.toBeUndefined();
     });
 
-    it('massageMarkdown returns input', () => {
-      expect(tangled.massageMarkdown('**bold**')).toBe('**bold**');
+    it('massageMarkdown removes the rebase checkbox', () => {
+      const body =
+        '**Rebasing**: Whenever PR becomes conflicted, or you tick the rebase/retry checkbox.\n\n---\n\n - [ ] <!-- rebase-check -->If you want to rebase/retry this PR, check this box\n\n';
+
+      const result = tangled.massageMarkdown(body);
+
+      expect(result).not.toContain('<!-- rebase-check -->');
+      expect(result).toContain('you add the _rebase_ label');
+    });
+
+    it('massageMarkdown uses a custom rebase label', () => {
+      const result = tangled.massageMarkdown(
+        'you tick the rebase/retry checkbox',
+        'retry',
+      );
+      expect(result).toBe('you add the _retry_ label');
+    });
+
+    it('massageMarkdown rewrites the edited-PR notice', () => {
+      const result = tangled.massageMarkdown(
+        'checking the rebase/retry box above',
+      );
+      expect(result).toBe('adding the _rebase_ label');
     });
 
     it('maxBodyLength returns large number', () => {

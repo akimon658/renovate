@@ -570,6 +570,264 @@ describe('modules/platform/tangled/tangled-helper', () => {
     });
   });
 
+  describe('listLabelOps', () => {
+    it('lists label ops across pages', async () => {
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({
+          body: {
+            items: [{ value: { subject: 'pull', add: [], delete: [] } }],
+            cursor: 'next',
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            items: [{ value: { subject: 'pull', add: [], delete: [] } }],
+          },
+        });
+
+      const ops = await helper.listLabelOps(
+        'https://api.tangled.org/',
+        'at://did:plc:bot/sh.tangled.repo.pull/tid',
+      );
+
+      expect(ops).toHaveLength(2);
+      expect(httpMocks.getJsonUnchecked).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('cursor=next'),
+      );
+    });
+  });
+
+  describe('listLabelDefinitions', () => {
+    it('maps definition AT-URIs to their names', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          items: [
+            {
+              uri: 'at://did:plc:labeler/sh.tangled.label.definition/abc',
+              value: { name: 'rebase' },
+            },
+            {
+              uri: 'at://did:plc:labeler/sh.tangled.label.definition/def',
+              value: { name: '' },
+            },
+          ],
+        },
+      });
+
+      const definitions = await helper.listLabelDefinitions(
+        'https://api.tangled.org/',
+        'did:plc:labeler',
+      );
+
+      expect(
+        definitions.get('at://did:plc:labeler/sh.tangled.label.definition/abc'),
+      ).toBe('rebase');
+      expect(definitions.size).toBe(1);
+    });
+  });
+
+  describe('getLabels', () => {
+    it('returns no labels when there are no ops', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { items: [] },
+      });
+
+      await expect(
+        helper.getLabels(
+          'https://api.tangled.org/',
+          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        ),
+      ).resolves.toEqual([]);
+    });
+
+    it('returns no labels when every op has been deleted', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          items: [
+            {
+              value: {
+                subject: 'pull',
+                add: [],
+                delete: [
+                  {
+                    key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+                    value: 'null',
+                  },
+                ],
+                performedAt: '2026-01-01T00:00:00Z',
+              },
+            },
+          ],
+        },
+      });
+
+      await expect(
+        helper.getLabels(
+          'https://api.tangled.org/',
+          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        ),
+      ).resolves.toEqual([]);
+    });
+
+    it('orders ops by instant across UTC offsets', async () => {
+      const rebase = 'at://did:plc:labeler/sh.tangled.label.definition/rebase';
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          items: [
+            {
+              value: {
+                subject: 'pull',
+                add: [{ key: rebase, value: 'null' }],
+                delete: [],
+                // 06:00 UTC
+                performedAt: '2026-01-01T09:00:00+03:00',
+              },
+            },
+            {
+              value: {
+                subject: 'pull',
+                add: [],
+                delete: [{ key: rebase, value: 'null' }],
+                // 07:00 UTC
+                performedAt: '2026-01-01T07:00:00Z',
+              },
+            },
+          ],
+        },
+      });
+
+      await expect(
+        helper.getLabels(
+          'https://api.tangled.org/',
+          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        ),
+      ).resolves.toEqual([]);
+    });
+
+    it('replays ops and resolves definition names', async () => {
+      const rebase = 'at://did:plc:labeler/sh.tangled.label.definition/rebase';
+      const keep = 'at://did:plc:labeler/sh.tangled.label.definition/keep';
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({
+          body: {
+            items: [
+              {
+                value: {
+                  subject: 'pull',
+                  add: [{ key: rebase, value: 'null' }],
+                  delete: [],
+                  performedAt: '2026-01-02T00:00:00Z',
+                },
+              },
+              {
+                value: {
+                  subject: 'pull',
+                  add: [{ key: keep, value: 'null' }],
+                  delete: [],
+                  performedAt: '2026-01-01T00:00:00Z',
+                },
+              },
+              {
+                value: {
+                  subject: 'pull',
+                  add: [],
+                  delete: [{ key: keep, value: 'null' }],
+                  performedAt: '2026-01-03T00:00:00Z',
+                },
+              },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            items: [
+              {
+                uri: rebase,
+                value: { name: 'rebase' },
+              },
+            ],
+          },
+        });
+
+      await expect(
+        helper.getLabels(
+          'https://api.tangled.org/',
+          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        ),
+      ).resolves.toEqual([{ key: rebase, value: 'null', name: 'rebase' }]);
+    });
+
+    it('falls back to the definition rkey when unnamed', async () => {
+      const unknown = 'at://did:plc:labeler/sh.tangled.label.definition/xyz';
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({
+          body: {
+            items: [
+              {
+                value: {
+                  subject: 'pull',
+                  add: [{ key: unknown, value: 'null' }],
+                  delete: [],
+                  performedAt: '2026-01-01T00:00:00Z',
+                },
+              },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({ body: { items: [] } });
+
+      await expect(
+        helper.getLabels(
+          'https://api.tangled.org/',
+          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        ),
+      ).resolves.toEqual([{ key: unknown, value: 'null', name: 'xyz' }]);
+    });
+  });
+
+  describe('createLabelOp', () => {
+    it('throws when not authenticated', async () => {
+      await expect(helper.createLabelOp('at://pull', [], [])).rejects.toThrow(
+        'Not authenticated',
+      );
+    });
+
+    it('creates a label op record in the bot PDS', async () => {
+      await authenticate();
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.createLabelOp(
+        'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        [
+          {
+            key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+            value: 'null',
+          },
+        ],
+        [],
+      );
+
+      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.createRecord', {
+        input: {
+          repo: 'did:plc:bot123',
+          collection: 'sh.tangled.label.op',
+          record: expect.objectContaining({
+            $type: 'sh.tangled.label.op',
+            subject: 'at://did:plc:bot/sh.tangled.repo.pull/tid',
+            add: [
+              {
+                key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
+                value: 'null',
+              },
+            ],
+            delete: [],
+          }),
+        },
+      });
+    });
+  });
+
   describe('mergePull', () => {
     it('merges a pull via the knotserver', async () => {
       await authenticate();

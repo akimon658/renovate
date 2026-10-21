@@ -65,6 +65,9 @@ export class GlobalConfig {
     'requireConfig',
     's3Endpoint',
     's3PathStyle',
+    'tangledAppviewUrl',
+    'tangledSshHost',
+    'tangledSshPort',
     'toolSettings',
     'userAgent',
   ] as const satisfies readonly (

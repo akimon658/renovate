@@ -1659,6 +1659,33 @@ const options: Readonly<RenovateOptions>[] = [
     supportedPlatforms: ['azure'],
   },
   {
+    name: 'tangledAppviewUrl',
+    description:
+      'The Bobbin API appview URL used to read Tangled records (e.g. labels).',
+    type: 'string',
+    default: 'https://api.tangled.org/',
+    supportedPlatforms: ['tangled'],
+    globalOnly: true,
+  },
+  {
+    name: 'tangledSshHost',
+    description:
+      'The SSH hostname of the knotserver used for git operations on Tangled.',
+    type: 'string',
+    default: 'tangled.org',
+    supportedPlatforms: ['tangled'],
+    globalOnly: true,
+  },
+  {
+    name: 'tangledSshPort',
+    description:
+      'The SSH port of the knotserver used for git operations on Tangled.',
+    type: 'integer',
+    default: 22,
+    supportedPlatforms: ['tangled'],
+    globalOnly: true,
+  },
+  {
     name: 'autoApprove',
     scopes: sharedScopes,
     description: 'Set to `true` to automatically approve PRs.',

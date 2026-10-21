@@ -1,8 +1,10 @@
 import { DateTime } from 'luxon';
 import { logger } from '../../../logger/index.ts';
 import type { BranchStatus } from '../../../types/index.ts';
+import { coerceArray } from '../../../util/array.ts';
 import { parseJson } from '../../../util/common.ts';
 import * as git from '../../../util/git/index.ts';
+import { regEx } from '../../../util/regex.ts';
 import { sanitize } from '../../../util/sanitize.ts';
 import { ensureTrailingSlash } from '../../../util/url.ts';
 import type {
@@ -24,17 +26,18 @@ import type {
   UpdatePrConfig,
 } from '../types.ts';
 import { repoFingerprint } from '../util.ts';
+import { smartTruncate } from '../utils/pr-body.ts';
 import * as helper from './tangled-helper.ts';
-import type { TangledPull, TangledRepoConfig } from './types.ts';
-import { getSshHostFromBaseUrl, tidToNumber, toRenovatePr } from './utils.ts';
+import type { TangledLabel, TangledPull, TangledRepoConfig } from './types.ts';
+import { tidToNumber, toRenovatePr } from './utils.ts';
 
 export const id = 'tangled';
 
 const defaults = {
-  endpoint: 'https://tangled.org/',
+  appview: 'https://api.tangled.org/',
+  sshHost: 'tangled.org',
+  sshPort: 22,
 };
-
-let sshHost = '';
 
 let config: TangledRepoConfig = {} as any;
 let cachedPrList: Pr[] | null = null;
@@ -42,14 +45,18 @@ let cachedPrList: Pr[] | null = null;
 const prNumberToUri = new Map<number, string>();
 // Map from derived PR number → rkey (TID) for record operations
 const prNumberToRkey = new Map<number, string>();
+// Map from derived PR number → currently applied labels
+const prNumberToLabels = new Map<number, TangledLabel[]>();
 
 export function resetPlatform(): void {
-  defaults.endpoint = 'https://tangled.org/';
-  sshHost = '';
+  defaults.appview = 'https://api.tangled.org/';
+  defaults.sshHost = 'tangled.org';
+  defaults.sshPort = 22;
   config = {} as any;
   cachedPrList = null;
   prNumberToUri.clear();
   prNumberToRkey.clear();
+  prNumberToLabels.clear();
   helper.resetHelper();
 }
 
@@ -63,9 +70,10 @@ function matchesState(actual: string, expected: string): boolean {
   return actual === expected;
 }
 
-function buildPrCache(pulls: TangledPull[]): Pr[] {
+async function buildPrCache(pulls: TangledPull[]): Promise<Pr[]> {
   prNumberToUri.clear();
   prNumberToRkey.clear();
+  prNumberToLabels.clear();
 
   const prs: Pr[] = [];
   for (const pull of pulls) {
@@ -82,15 +90,40 @@ function buildPrCache(pulls: TangledPull[]): Pr[] {
     }
   }
 
+  // Labels are stored as operations in each actor's PDS and aggregated by the
+  // appview, so they need a separate lookup. Only open PRs need them, for
+  // rebase/keep-updated handling. Failures are non-fatal.
+  await Promise.all(
+    prs
+      .filter((pr) => pr.state === 'open')
+      .map(async (pr) => {
+        const uri = prNumberToUri.get(pr.number)!;
+        try {
+          const labels = coerceArray(
+            await helper.getLabels(defaults.appview, uri),
+          );
+          prNumberToLabels.set(pr.number, labels);
+          pr.labels = labels.map((label) => label.name);
+        } catch (err) {
+          logger.debug(
+            { err, prNumber: pr.number },
+            'Failed to fetch PR labels',
+          );
+        }
+      }),
+  );
+
   return prs;
 }
 
 const platform: Platform = {
   async initPlatform({
-    endpoint,
     username,
     password,
     gitAuthor,
+    tangledAppviewUrl,
+    tangledSshHost,
+    tangledSshPort,
   }: PlatformParams): Promise<PlatformResult> {
     if (!username || !password) {
       throw new Error(
@@ -102,10 +135,33 @@ const platform: Platform = {
       throw new Error('Init: You must configure gitAuthor for Tangled');
     }
 
-    // The endpoint is the Tangled base URL used to derive the SSH host.
-    // HTTP XRPC calls still go directly to the repository's knot.
-    defaults.endpoint = ensureTrailingSlash(endpoint ?? defaults.endpoint);
-    sshHost = getSshHostFromBaseUrl(defaults.endpoint);
+    // The Bobbin API appview serves indexed reads (e.g. labels).
+    defaults.appview = ensureTrailingSlash(
+      tangledAppviewUrl ?? defaults.appview,
+    );
+    if (!regEx(/^https?:\/\//).test(defaults.appview)) {
+      throw new Error(
+        `Init: Invalid tangledAppviewUrl for Tangled: ${defaults.appview}`,
+      );
+    }
+
+    // Git operations go over SSH to the knotserver hosting the repository.
+    defaults.sshHost = (tangledSshHost ?? defaults.sshHost).trim();
+    if (!defaults.sshHost || regEx(/[:@/\s]/).test(defaults.sshHost)) {
+      throw new Error(
+        `Init: Invalid tangledSshHost for Tangled: ${defaults.sshHost}`,
+      );
+    }
+    defaults.sshPort = tangledSshPort ?? defaults.sshPort;
+    if (
+      !Number.isSafeInteger(defaults.sshPort) ||
+      defaults.sshPort < 1 ||
+      defaults.sshPort > 65535
+    ) {
+      throw new Error(
+        `Init: Invalid tangledSshPort for Tangled: ${defaults.sshPort}`,
+      );
+    }
 
     // Resolve the bot account's handle to its PDS, so no PDS config is needed
     let sessionInfo: { did: string; handle: string; pdsUrl: string };
@@ -123,7 +179,7 @@ const platform: Platform = {
     );
 
     return {
-      endpoint: defaults.endpoint,
+      endpoint: defaults.appview,
       renovateUsername: sessionInfo.handle,
       gitAuthor,
     };
@@ -212,8 +268,11 @@ const platform: Platform = {
       'Tangled repo initialized',
     );
 
-    // Initialize git with SSH URL, always via the Tangled base URL host.
-    const sshUrl = `git@${sshHost}:${ownerDid}/${config.knotRkey}`;
+    // Initialize git with an SSH URL to the configured knotserver host.
+    const sshUrl =
+      defaults.sshPort === 22
+        ? `git@${defaults.sshHost}:${ownerDid}/${config.knotRkey}`
+        : `ssh://git@${defaults.sshHost}:${defaults.sshPort}/${ownerDid}/${config.knotRkey}`;
     await git.initRepo({
       url: sshUrl,
       defaultBranch: config.defaultBranch,
@@ -241,7 +300,7 @@ const platform: Platform = {
     }
 
     const pulls = await helper.listPullRecords();
-    cachedPrList = buildPrCache(pulls);
+    cachedPrList = await buildPrCache(pulls);
     logger.debug(
       `Retrieved ${cachedPrList.length} PRs for ${config.repository}`,
     );
@@ -450,8 +509,36 @@ const platform: Platform = {
     return Promise.resolve();
   },
 
-  deleteLabel(_number: number, _label: string): Promise<void> {
-    return Promise.resolve();
+  async deleteLabel(number: number, label: string): Promise<void> {
+    logger.debug(`deleteLabel(${number}, ${label})`);
+    const uri = prNumberToUri.get(number);
+    if (!uri) {
+      logger.warn({ number }, 'Cannot delete label - PR URI not found');
+      return;
+    }
+
+    const applied = coerceArray(prNumberToLabels.get(number));
+    const target = applied.filter((entry) => entry.name === label);
+    if (target.length === 0) {
+      logger.debug({ number, label }, 'Label is not applied to the PR');
+      return;
+    }
+
+    try {
+      await helper.createLabelOp(
+        uri,
+        [],
+        target.map((entry) => ({ key: entry.key, value: entry.value })),
+      );
+      prNumberToLabels.set(
+        number,
+        applied.filter((entry) => entry.name !== label),
+      );
+      // Invalidate the cache so the next read reflects the removal.
+      cachedPrList = null;
+    } catch (err) {
+      logger.warn({ err, number, label }, 'Failed to delete label');
+    }
   },
 
   findIssue(_title: string): Promise<Issue | null> {
@@ -480,8 +567,20 @@ const platform: Platform = {
     return Promise.resolve();
   },
 
-  massageMarkdown(prBody: string): string {
-    return prBody;
+  massageMarkdown(prBody: string, rebaseLabel = 'rebase'): string {
+    // Tangled PR records live in the author's PDS, so only Renovate can edit
+    // the body or title. Replace the unusable rebase/retry checkbox with the
+    // label maintainers can apply instead.
+    return smartTruncate(prBody, platform.maxBodyLength())
+      .replace(
+        'you tick the rebase/retry checkbox',
+        `you add the _${rebaseLabel}_ label`,
+      )
+      .replace(
+        'checking the rebase/retry box above',
+        `adding the _${rebaseLabel}_ label`,
+      )
+      .replace(regEx(`\n---\n\n.*?<!-- rebase-check -->.*?\n`), '');
   },
 
   maxBodyLength(): number {
