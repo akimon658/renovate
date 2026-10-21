@@ -13,6 +13,12 @@ export interface PlatformParams {
   username?: string;
   password?: string;
   gitAuthor?: string;
+  /** Tangled only: Bobbin API appview URL. */
+  tangledAppviewUrl?: string;
+  /** Tangled only: knotserver SSH hostname for git operations. */
+  tangledSshHost?: string;
+  /** Tangled only: knotserver SSH port for git operations. */
+  tangledSshPort?: number;
 }
 
 export interface PlatformResult {

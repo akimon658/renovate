@@ -37,3 +37,24 @@ export interface TangledPull {
 }
 
 export type TangledPullStatus = 'open' | 'closed' | 'merged';
+
+/**
+ * A label currently applied to a pull request.
+ *
+ * `key` is the AT-URI of the `sh.tangled.label.definition` record, `value` is
+ * the stringified value of that label, and `name` is the definition's display
+ * name used for matching against Renovate config (e.g. `rebaseLabel`).
+ */
+export interface TangledLabel {
+  key: string;
+  value: string;
+  name: string;
+}
+
+/**
+ * A label operation operand, identifying a label definition and its value.
+ */
+export interface TangledLabelOperand {
+  key: string;
+  value: string;
+}

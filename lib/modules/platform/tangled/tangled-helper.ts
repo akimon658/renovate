@@ -1,13 +1,20 @@
 import type {} from '@atcute/atproto';
 import { Client, ok, simpleFetchHandler } from '@atcute/client';
 import { PasswordSession } from '@atcute/password-session';
-import type { ShTangledRepoPull } from '@atcute/tangled';
-import { isObject } from '@sindresorhus/is';
+import type {
+  ShTangledLabelDefinition,
+  ShTangledLabelOp,
+  ShTangledRepoPull,
+} from '@atcute/tangled';
+import { isObject, isTruthy } from '@sindresorhus/is';
 import { DateTime } from 'luxon';
 import { logger } from '../../../logger/index.ts';
+import { coerceArray } from '../../../util/array.ts';
 import { TangledHttp } from '../../../util/http/tangled.ts';
-import { getQueryString } from '../../../util/url.ts';
+import { ensureTrailingSlash, getQueryString } from '../../../util/url.ts';
 import type {
+  TangledLabel,
+  TangledLabelOperand,
   TangledPull,
   TangledPullStatus,
   TangledRepoRef,
@@ -394,6 +401,153 @@ export async function listPullRecords(): Promise<TangledPull[]> {
   }
 
   return pulls;
+}
+
+/**
+ * List label operations for a pull request via the appview.
+ *
+ * Label ops live in the PDS of whoever applied them, so they cannot be read
+ * from the bot's own records. The appview (Bobbin) aggregates them.
+ */
+export async function listLabelOps(
+  appview: string,
+  subject: string,
+): Promise<ShTangledLabelOp.Main[]> {
+  const ops: ShTangledLabelOp.Main[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const query = getQueryString({
+      subject,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const url = `${ensureTrailingSlash(appview)}xrpc/sh.tangled.label.listOps?${query}`;
+    const res = await tangledHttp.getJsonUnchecked<{
+      items: { value: ShTangledLabelOp.Main }[];
+      cursor?: string;
+    }>(url);
+    ops.push(...res.body.items.map((item) => item.value));
+    cursor = res.body.cursor;
+  } while (cursor);
+
+  return ops;
+}
+
+/**
+ * List a label author's definitions, returning a map of definition AT-URI
+ * to display name.
+ */
+export async function listLabelDefinitions(
+  appview: string,
+  authorDid: string,
+): Promise<Map<string, string>> {
+  const definitions = new Map<string, string>();
+  let cursor: string | undefined;
+
+  do {
+    const query = getQueryString({
+      subject: authorDid,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const url = `${ensureTrailingSlash(appview)}xrpc/sh.tangled.label.listDefinitions?${query}`;
+    const res = await tangledHttp.getJsonUnchecked<{
+      items: { uri: string; value: ShTangledLabelDefinition.Main }[];
+      cursor?: string;
+    }>(url);
+    for (const item of res.body.items) {
+      if (item.value?.name) {
+        definitions.set(item.uri, item.value.name);
+      }
+    }
+    cursor = res.body.cursor;
+  } while (cursor);
+
+  return definitions;
+}
+
+/**
+ * Compute the labels currently applied to a pull request by replaying its
+ * label operations in chronological order and resolving each definition.
+ */
+export async function getLabels(
+  appview: string,
+  subject: string,
+): Promise<TangledLabel[]> {
+  const ops = await listLabelOps(appview, subject);
+  if (ops.length === 0) {
+    return [];
+  }
+
+  // Replay add/delete operations in the order they were performed. Parse the
+  // timestamps rather than comparing the raw strings, since they carry
+  // different UTC offsets.
+  const applied = new Map<string, string>();
+  for (const op of [...ops].sort(
+    (a, b) =>
+      DateTime.fromISO(a.performedAt).toMillis() -
+      DateTime.fromISO(b.performedAt).toMillis(),
+  )) {
+    for (const operand of coerceArray(op.delete)) {
+      applied.delete(operand.key);
+    }
+    for (const operand of coerceArray(op.add)) {
+      applied.set(operand.key, operand.value);
+    }
+  }
+  if (applied.size === 0) {
+    return [];
+  }
+
+  // Definition names live in their author's records, queried per author.
+  const names = new Map<string, string>();
+  const authors = new Set(
+    [...applied.keys()].map((uri) => uri.split('/')[2]).filter(isTruthy),
+  );
+  await Promise.all(
+    [...authors].map(async (author) => {
+      const definitions = await listLabelDefinitions(appview, author);
+      for (const [uri, name] of definitions) {
+        names.set(uri, name);
+      }
+    }),
+  );
+
+  return [...applied.entries()].map(([key, value]) => ({
+    key,
+    value,
+    name: names.get(key) ?? rkeyFromUri(key),
+  }));
+}
+
+/**
+ * Write a label operation (add/delete) to the bot's own PDS.
+ */
+export async function createLabelOp(
+  subject: string,
+  add: TangledLabelOperand[],
+  remove: TangledLabelOperand[],
+): Promise<void> {
+  if (!pdsClient) {
+    throw new Error('Not authenticated');
+  }
+
+  await ok(
+    pdsClient.post('com.atproto.repo.createRecord', {
+      input: {
+        repo: botDid as any,
+        collection: 'sh.tangled.label.op' as any,
+        record: {
+          $type: 'sh.tangled.label.op',
+          subject,
+          add,
+          delete: remove,
+          performedAt: DateTime.utc().toISO(),
+        },
+      },
+    }),
+  );
 }
 
 /**

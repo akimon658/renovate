@@ -281,6 +281,9 @@ export interface RepoGlobalConfig extends GlobalInheritableConfig {
   productLinks?: Record<string, string>;
   rebaseAllOpenBranches?: boolean;
   toolSettings?: GlobalToolSettingsOptions;
+  tangledAppviewUrl?: string;
+  tangledSshHost?: string;
+  tangledSshPort?: number;
 }
 
 /**
