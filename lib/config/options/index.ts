@@ -825,7 +825,7 @@ const options: Readonly<RenovateOptions>[] = [
     description:
       'Change this value to override the default Renovate sidecar image.',
     type: 'string',
-    default: 'ghcr.io/renovatebot/base-image:13.139.0',
+    default: 'ghcr.io/renovatebot/base-image:13.140.0',
     globalOnly: true,
     deprecationMsg:
       'The usage of `binarySource=docker` is deprecated, and will be removed in the future',
@@ -3185,7 +3185,7 @@ const options: Readonly<RenovateOptions>[] = [
     description:
       'Configuration object to define language or manager version constraints.',
     type: 'object',
-    default: { ghActionsLock: 'v0.2.0' },
+    default: { ghActionsLock: 'v0.3.0' },
     mergeable: true,
     cli: false,
     supportedManagers: [
