@@ -449,7 +449,9 @@ export async function resubmitPull(
 export async function setPullStatus(
   pullUri: string,
   status:
-    'sh.tangled.repo.pull.status.open' | 'sh.tangled.repo.pull.status.closed',
+    | 'sh.tangled.repo.pull.status.open'
+    | 'sh.tangled.repo.pull.status.closed'
+    | 'sh.tangled.repo.pull.status.merged',
 ): Promise<void> {
   if (!pdsClient) {
     throw new Error('Not authenticated');

@@ -918,7 +918,7 @@ describe('modules/platform/tangled/index', () => {
       );
       expect(helperMock.setPullStatus).toHaveBeenCalledWith(
         `at://did:plc:bot/sh.tangled.repo.pull/${mockRkey}`,
-        'sh.tangled.repo.pull.status.closed',
+        'sh.tangled.repo.pull.status.merged',
       );
     });
 

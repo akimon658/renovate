@@ -792,6 +792,28 @@ describe('modules/platform/tangled/tangled-helper', () => {
         },
       });
     });
+
+    it('creates a merged status record', async () => {
+      await authenticate();
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.setPullStatus(
+        'at://did:plc:bot/sh.tangled.repo.pull/tid',
+        'sh.tangled.repo.pull.status.merged',
+      );
+
+      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.createRecord', {
+        input: {
+          repo: 'did:plc:bot123',
+          collection: 'sh.tangled.repo.pull.status',
+          record: {
+            $type: 'sh.tangled.repo.pull.status',
+            pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid',
+            status: 'sh.tangled.repo.pull.status.merged',
+          },
+        },
+      });
+    });
   });
 
   describe('listPullRecords', () => {
