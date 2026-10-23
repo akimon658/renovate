@@ -526,7 +526,7 @@ const platform: Platform = {
       );
 
       // Set PR status to merged
-      await helper.setPullStatus(uri, 'sh.tangled.repo.pull.status.closed');
+      await helper.setPullStatus(uri, 'sh.tangled.repo.pull.status.merged');
 
       // Invalidate cache
       cachedPrList = null;
