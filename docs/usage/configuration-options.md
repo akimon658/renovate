@@ -922,6 +922,9 @@ The downside of this is that you may end up with a very old issue getting "recyc
 Constraints are used in package managers which use third-party tools to update "artifacts" like lock files or checksum files.
 Typically, the constraint is detected automatically by Renovate from files within the repository and there is no need to manually configure it.
 
+Tool versions in [mise](modules/manager/mise/index.md#tool-versions-as-constraints) config files or [`rust-toolchain`](modules/manager/rust-toolchain/index.md) files are also used for artifact updates of other managers in the same directory and below.
+A constraint which the manager detects itself, like `engines` in a `package.json` or the `lockfileVersion` of a `pnpm-lock.yaml`, takes precedence over these versions, unless they are within it.
+
 Constraints are also used to manually restrict which _datasource_ versions are possible to upgrade to based on their language support.
 For now this datasource constraint feature only supports `python`, other compatibility restrictions will be added in the future.
 
@@ -1617,6 +1620,7 @@ You can choose from:
 - `all` list all CVEs
 
 You will only get OSV-based vulnerability alerts for direct dependencies.
+The only exception today is the `pep621` manager, for `uv` projects.
 
 This feature is independent of the `osvVulnerabilityAlerts` option.
 
@@ -3113,6 +3117,7 @@ Renovate integrates with [OSV](https://osv.dev/), an Open Source vulnerability d
 Set `osvVulnerabilityAlerts` to `true` to get pull requests with vulnerability fixes (once they are available).
 
 You will only get OSV-based vulnerability alerts for _direct_ dependencies.
+The only exception today is the `pep621` manager, for `uv` projects.
 Renovate only queries the OSV database for dependencies that use one of these datasources:
 
 - [`crate`](./modules/datasource/crate/index.md)
@@ -5230,7 +5235,16 @@ You can set this option to `false` if you wish to disable updating for pinned (s
 ## `useBaseBranchConfig`
 
 By default, Renovate will read config file from the default branch only and will ignore any config files in base branches.
-You can configure `useBaseBranchConfig=merge` to instruct Renovate to merge the config from each base branch over the top of the config in the default branch.
+
+Set `useBaseBranchConfig=merge` to instruct Renovate to merge the config from each base branch over the top of the config in the default branch.
+Renovate will error if the config file is not found on the branch.
+
+Set `useBaseBranchConfig=merge-if-present` to merge the config from each base branch in the same way, but only if the config file exists on the branch.
+If the config file does not exist on the branch, Renovate will use the default branch config instead.
+If the config file exists but is invalid or contains validation errors, Renovate will error.
+This is useful for repos with many branches where only some branches have branch-specific config, but [`baseBranchPatterns`](#basebranchpatterns) and `useBaseBranchConfig` are set in a shared preset.
+
+With both `merge` and `merge-if-present`, an empty config file on a branch is treated as an empty config (`{}`).
 
 The config file name in the base branch must be the same as in the default branch and cannot be `package.json`.
 This scenario may be useful for testing the config changes in base branches instantly.
