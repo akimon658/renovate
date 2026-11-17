@@ -23,7 +23,11 @@ const TID_CHARSET = '234567abcdefghijklmnopqrstuvwxyz';
 export function tidToNumber(tid: string): number {
   let n = 0n;
   for (const c of tid) {
-    n = n * 32n + BigInt(TID_CHARSET.indexOf(c));
+    const digit = TID_CHARSET.indexOf(c);
+    if (digit < 0) {
+      throw new Error(`Invalid TID character: ${c}`);
+    }
+    n = n * 32n + BigInt(digit);
   }
   return parseInt((n >> 10n).toString(), 10);
 }
@@ -44,15 +48,8 @@ export function ticketNumberToPrNumber(rkey: string): number {
   if (regEx(/^[234567abcdefghijklmnopqrstuvwxyz]{13}$/).test(rkey)) {
     return tidToNumber(rkey);
   }
-  // Last resort: numeric prefix, or TID decode (may be 0)
-  if (Number.isSafeInteger(parsed)) {
-    return parsed;
-  }
-  try {
-    return tidToNumber(rkey);
-  } catch {
-    return 0;
-  }
+  // Unparseable rkeys must not collide with real ticket numbers
+  return 0;
 }
 
 /**
@@ -127,8 +124,13 @@ export function toRenovatePr(pull: TangledPull): Pr | null {
   const title = ticketText(record.title);
   const body = ticketText(record.body);
 
+  const number = ticketNumberToPrNumber(pull.rkey);
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return null;
+  }
+
   return {
-    number: ticketNumberToPrNumber(pull.rkey),
+    number,
     title,
     state,
     sourceBranch,

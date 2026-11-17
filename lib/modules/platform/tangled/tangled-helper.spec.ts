@@ -388,61 +388,100 @@ describe('modules/platform/tangled/tangled-helper', () => {
       await helper.updatePullRecord(repoDid, knotUrl, '92', { title: 'new' });
       expect(httpMocks.postJson).toHaveBeenCalledTimes(2);
     });
+
+    it('strips all x-tngl- ephemeral fields when writing back', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'old',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 'old',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
+            'x-tngl-editor': 'did:plc:someone',
+            'x-tngl-future': 'ephemeral',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'newcid',
+        },
+      });
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.updatePullRecord(repoDid, knotUrl, '92', {
+        title: 'new',
+      });
+
+      const written = httpMocks.postJson.mock.calls[0][1] as {
+        body: { record: Record<string, unknown> };
+      };
+      expect(written.body.record).not.toHaveProperty('x-tngl-editor');
+      expect(written.body.record).not.toHaveProperty('x-tngl-future');
+    });
   });
 
   describe('resubmitPull', () => {
     const targetHead = 'a'.repeat(40);
     const sourceHead = 'b'.repeat(40);
 
-    function mockHeads(): void {
-      httpMocks.getJsonUnchecked
-        .mockResolvedValueOnce({ body: { oid: sourceHead } })
-        .mockResolvedValueOnce({ body: { oid: targetHead } })
-        .mockResolvedValueOnce({ body: { commit: targetHead } });
-    }
-
-    function mockRounds(rounds: { head: string }[], cid = 'cid1'): void {
+    function mockRounds(heads: string[]): void {
       httpMocks.getJsonUnchecked.mockResolvedValueOnce({
         body: {
-          records: rounds.map((r, i) => ({
+          records: heads.map((head, i) => ({
             uri: `at://${repoDid}/org.tangled.review.patch/p${i}`,
             cid: `c${i}`,
             value: {
               $type: 'org.tangled.review.patch',
               ticket: '92',
               base: { oid: targetHead },
-              head: { oid: r.head },
+              head: { oid: head },
               source: { repo: repoDid, branch: 'renovate/foo' },
               createdAt: '2025-01-01T00:00:00.000Z',
             },
           })),
         },
       });
-      void cid;
     }
+
+    function mockSourceHead(): void {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { oid: sourceHead },
+      });
+    }
+
+    function mockTargetHeadAndBase(): void {
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({ body: { oid: targetHead } })
+        .mockResolvedValueOnce({ body: { commit: targetHead } });
+    }
+
+    it('throws when not authenticated', async () => {
+      await expect(
+        helper.resubmitPull(
+          repoDid,
+          knotUrl,
+          appview,
+          'main',
+          'renovate/foo',
+          '92',
+        ),
+      ).rejects.toThrow('Not authenticated');
+    });
 
     it('does nothing when the latest round matches the branch', async () => {
       await authenticate();
-      mockHeads();
-      // listRounds via knot listRecords
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          records: [
-            {
-              uri: `at://${repoDid}/org.tangled.review.patch/p0`,
-              cid: 'c0',
-              value: {
-                $type: 'org.tangled.review.patch',
-                ticket: '92',
-                base: { oid: targetHead },
-                head: { oid: sourceHead },
-                source: { repo: repoDid, branch: 'renovate/foo' },
-                createdAt: '2025-01-01T00:00:00.000Z',
-              },
-            },
-          ],
-        },
-      });
+      mockRounds([sourceHead]);
+      mockSourceHead();
 
       await expect(
         helper.resubmitPull(
@@ -455,12 +494,15 @@ describe('modules/platform/tangled/tangled-helper', () => {
         ),
       ).resolves.toEqual({ changed: false, resubmitted: false, round: 0 });
       expect(httpMocks.postJson).not.toHaveBeenCalled();
+      // No target head or merge base lookup on the no-change path
+      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledTimes(2);
     });
 
     it('submits a new patch when the branch moved', async () => {
       await authenticate();
-      mockHeads();
-      mockRounds([{ head: 'o'.repeat(40) }]);
+      mockRounds(['o'.repeat(40)]);
+      mockSourceHead();
+      mockTargetHeadAndBase();
       mockGet.mockResolvedValueOnce({ token: 'jwt' });
       httpMocks.postJson.mockResolvedValueOnce({
         body: {
@@ -484,8 +526,8 @@ describe('modules/platform/tangled/tangled-helper', () => {
 
     it('writes nothing in dry-run mode', async () => {
       await authenticate();
-      mockHeads();
-      mockRounds([{ head: 'o'.repeat(40) }]);
+      mockRounds(['o'.repeat(40)]);
+      mockSourceHead();
 
       await expect(
         helper.resubmitPull(

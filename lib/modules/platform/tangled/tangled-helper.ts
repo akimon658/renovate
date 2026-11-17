@@ -437,7 +437,9 @@ async function putTicketRecord(
   record: Record<string, unknown>,
   swapRecord?: string,
 ): Promise<{ uri: string; cid: string }> {
-  const { ['x-tngl-editor']: _removed, ...clean } = record;
+  const clean = Object.fromEntries(
+    Object.entries(record).filter(([key]) => !key.startsWith('x-tngl-')),
+  );
   const res = await knotPost<{ uri: string; cid: string }>(
     repoDid,
     knotUrl,
@@ -555,65 +557,56 @@ export async function resubmitPull(
   rkey: string,
   dryRun = false,
 ): Promise<ResubmitPullResult> {
-  if (!pdsClient && !dryRun) {
-    // Reads work without auth, but submitting needs it. Check early for
-    // a clear error; dry-run never writes.
-    // Note: listRounds/getBranchHead themselves do not require auth.
+  if (!dryRun && !pdsClient) {
+    throw new Error('Not authenticated');
   }
-  const [sourceHead, targetHead] = await Promise.all([
-    getBranchHead(repoDid, sourceBranch, appview),
-    getBranchHead(repoDid, targetBranch, appview),
-  ]);
+  // Cheap checks first: read the rounds and the source branch head, and
+  // return early when they already match. The merge base is only computed
+  // when a new round will actually be submitted, keeping the common
+  // no-change case to one knot read plus one index read.
+  const rounds = await listRounds(repoDid, knotUrl, rkey);
+  const latest = rounds.at(-1) as { head?: { oid?: string } } | undefined;
+  const sourceHead = await getBranchHead(repoDid, sourceBranch, appview);
+
+  if (latest?.head?.oid === sourceHead) {
+    return {
+      changed: false,
+      resubmitted: false,
+      round: rounds.length ? rounds.length - 1 : null,
+    };
+  }
+
+  if (dryRun) {
+    return {
+      changed: true,
+      resubmitted: false,
+      round: rounds.length ? rounds.length - 1 : null,
+    };
+  }
+
+  const targetHead = await getBranchHead(repoDid, targetBranch, appview);
   const base = await getMergeBase(repoDid, targetHead, sourceHead, appview);
 
-  for (let attempt = 0; ; attempt++) {
-    const rounds = await listRounds(repoDid, knotUrl, rkey);
-    const latest = rounds.at(-1) as { head?: { oid?: string } } | undefined;
-
-    if (latest?.head?.oid === sourceHead) {
-      return {
-        changed: false,
-        resubmitted: false,
-        round: rounds.length ? rounds.length - 1 : null,
-      };
-    }
-
-    if (dryRun) {
-      return {
-        changed: true,
-        resubmitted: false,
-        round: rounds.length ? rounds.length - 1 : null,
-      };
-    }
-
-    try {
-      const patch = await knotPost<{ uri: string; cid: string }>(
-        repoDid,
-        knotUrl,
-        'org.tangled.review.submitPatch',
-        {
-          repo: repoDid,
-          patch: {
-            ticket: rkey,
-            base: { oid: base },
-            head: { oid: sourceHead },
-            sourceRepo: repoDid,
-            sourceBranch,
-          },
-        },
-      );
-      await attest(patch.uri, patch.cid);
-      return { changed: true, resubmitted: true, round: rounds.length };
-    } catch (err) {
-      if (attempt > 0 || !isInvalidSwap(err)) {
-        throw err;
-      }
-      logger.debug(
-        { err, rkey },
-        'Pull request record changed concurrently, retrying resubmit',
-      );
-    }
-  }
+  // submitPatch creates a new immutable record without a compare-and-swap
+  // precondition, so there is nothing to retry on: concurrent submissions
+  // simply append another round.
+  const patch = await knotPost<{ uri: string; cid: string }>(
+    repoDid,
+    knotUrl,
+    'org.tangled.review.submitPatch',
+    {
+      repo: repoDid,
+      patch: {
+        ticket: rkey,
+        base: { oid: base },
+        head: { oid: sourceHead },
+        sourceRepo: repoDid,
+        sourceBranch,
+      },
+    },
+  );
+  await attest(patch.uri, patch.cid);
+  return { changed: true, resubmitted: true, round: rounds.length };
 }
 
 function mapTicketState(state: unknown): TangledPullStatus {

@@ -87,6 +87,21 @@ describe('modules/platform/tangled/utils', () => {
         tidToNumber('3lbvg3wn2cs2i'),
       );
     });
+
+    it('returns 0 for numeric-prefixed garbage instead of colliding', () => {
+      expect(ticketNumberToPrNumber('123abc')).toBe(0);
+    });
+
+    it('returns 0 for unparseable rkeys', () => {
+      expect(ticketNumberToPrNumber('not-a-ticket!')).toBe(0);
+      expect(ticketNumberToPrNumber('')).toBe(0);
+    });
+
+    it('tidToNumber throws on invalid characters', () => {
+      expect(() => tidToNumber('!!!invalid!!!')).toThrow(
+        'Invalid TID character',
+      );
+    });
   });
 
   describe('rkeyFromUri', () => {
@@ -145,6 +160,13 @@ describe('modules/platform/tangled/utils', () => {
           record: ticketRecord({ targetBranch: 'main' }),
           rounds: [],
         }),
+      );
+      expect(pr).toBeNull();
+    });
+
+    it('returns null for an unparseable rkey', () => {
+      const pr = toRenovatePr(
+        partial<TangledPull>({ ...basePull, rkey: '123abc' }),
       );
       expect(pr).toBeNull();
     });
