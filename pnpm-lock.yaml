@@ -30,8 +30,8 @@ importers:
   .:
     dependencies:
       '@atcute/atproto':
-        specifier: 4.0.1
-        version: 4.0.1(@atcute/lexicons@2.1.1)
+        specifier: 4.0.5
+        version: 4.0.5(@atcute/lexicons@2.1.1)
       '@atcute/client':
         specifier: 5.0.0
         version: 5.0.0(@atcute/lexicons@2.1.1)(typescript@7.0.2)
@@ -39,8 +39,8 @@ importers:
         specifier: 1.0.0
         version: 1.0.0(@atcute/identity@2.0.2)(@atcute/lexicons@2.1.1)(typescript@7.0.2)
       '@atcute/tangled':
-        specifier: 2.0.3
-        version: 2.0.3(@atcute/lexicons@2.1.1)
+        specifier: 3.0.0
+        version: 3.0.0(@atcute/lexicons@2.1.1)
       '@aws-sdk/client-codecommit':
         specifier: 3.1139.0
         version: 3.1139.0
@@ -640,8 +640,8 @@ packages:
   '@arcanis/slice-ansi@1.1.1':
     resolution: {integrity: sha512-xguP2WR2Dv0gQ7Ykbdb7BNCnPnIPB94uTi0Z2NvkRBEnhbwjOQ7QyQKJXrVQg4qDpiD9hA5l5cCwy/z2OXgc3w==}
 
-  '@atcute/atproto@4.0.1':
-    resolution: {integrity: sha512-Ys6SPfsWkSw8+txpF/Ei2r2gUSBtGbo9IVtkgic5skP7cW8+DwMq3DXmGqtNvbr+w2GQU3+J5NG73f82lNcbww==}
+  '@atcute/atproto@4.0.5':
+    resolution: {integrity: sha512-Xs+lez1RxkX0PHwm49z5lxbeC2qg24be3OkK//eE/vYdTSk/i6wUVw69yA3q9m4FpypEaBbqy5GabAV09480Qg==}
     peerDependencies:
       '@atcute/lexicons': ^2.0.0
 
@@ -664,8 +664,8 @@ packages:
       '@atcute/identity': ^2.0.0
       '@atcute/lexicons': ^2.0.0
 
-  '@atcute/tangled@2.0.3':
-    resolution: {integrity: sha512-kEtsgbgc7ufD61mwGtmxLiBAqQUwQzv8rr0gkAnoYa+gD2pM+T1PXv1gWGRTu4OvXH5NEbWIz5WBfaKR8VcWlA==}
+  '@atcute/tangled@3.0.0':
+    resolution: {integrity: sha512-g0w83IzdypKG4m8fmLS5JuUpHgEfTbuydQodRgikvFSDV2hMAEY3Xnc8+w051p+p6ail29P8ZIA7vtazZ776Jw==}
     peerDependencies:
       '@atcute/lexicons': ^2.0.0
 
@@ -6141,7 +6141,7 @@ snapshots:
     dependencies:
       grapheme-splitter: 1.0.4
 
-  '@atcute/atproto@4.0.1(@atcute/lexicons@2.1.1)':
+  '@atcute/atproto@4.0.5(@atcute/lexicons@2.1.1)':
     dependencies:
       '@atcute/lexicons': 2.1.1
 
@@ -6175,9 +6175,9 @@ snapshots:
     transitivePeerDependencies:
       - typescript
 
-  '@atcute/tangled@2.0.3(@atcute/lexicons@2.1.1)':
+  '@atcute/tangled@3.0.0(@atcute/lexicons@2.1.1)':
     dependencies:
-      '@atcute/atproto': 4.0.1(@atcute/lexicons@2.1.1)
+      '@atcute/atproto': 4.0.5(@atcute/lexicons@2.1.1)
       '@atcute/lexicons': 2.1.1
 
   '@atcute/uint8array@1.2.0': {}

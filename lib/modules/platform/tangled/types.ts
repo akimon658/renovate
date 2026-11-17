@@ -1,4 +1,7 @@
-import type { ShTangledRepoPull } from '@atcute/tangled';
+import type {
+  OrgTangledReviewPatch,
+  OrgTangledTrackTicket,
+} from '@atcute/tangled';
 
 /**
  * Internal configuration state for a Tangled repository.
@@ -9,30 +12,44 @@ export interface TangledRepoConfig {
   ownerDid: string;
   repoDid: string;
   repoName: string;
-  knotRkey: string;
   knotHost: string;
+  knotUrl: string;
   defaultBranch: string;
 }
 
 /**
- * Resolved reference to a Tangled repository's `sh.tangled.repo` record.
+ * Resolved reference to a Tangled repository.
  */
 export interface TangledRepoRef {
   knot: string;
+  knotUrl: string;
   repoDid: string;
   name: string;
-  rkey: string;
+  defaultBranch?: string;
 }
 
 /**
+ * A single `org.tangled.review.patch` round.
+ */
+export type TangledPatch = OrgTangledReviewPatch.Main;
+
+/**
+ * A single `org.tangled.track.ticket` record acting as a pull request
+ * (i.e. with `targetBranch` set).
+ */
+export type TangledTicket = OrgTangledTrackTicket.Main;
+
+/**
  * Represents a Tangled pull request with resolved status,
- * combining the PR record with its latest status record.
+ * combining the ticket record with its patch rounds.
  */
 export interface TangledPull {
   uri: string;
   cid: string;
+  /** Ticket record key: the pull number shown on tangled.org (e.g. "92"). */
   rkey: string;
-  record: ShTangledRepoPull.Main;
+  record: TangledTicket;
+  rounds: TangledPatch[];
   status: TangledPullStatus;
 }
 
@@ -41,9 +58,10 @@ export type TangledPullStatus = 'open' | 'closed' | 'merged';
 /**
  * A label currently applied to a pull request.
  *
- * `key` is the AT-URI of the `sh.tangled.label.definition` record, `value` is
- * the stringified value of that label, and `name` is the definition's display
- * name used for matching against Renovate config (e.g. `rebaseLabel`).
+ * `key` is the AT-URI of the `org.tangled.label.definition` record,
+ * `value` is unused in the new record format (kept for compatibility),
+ * and `name` is the definition's display name used for matching against
+ * Renovate config (e.g. `rebaseLabel`).
  */
 export interface TangledLabel {
   key: string;
