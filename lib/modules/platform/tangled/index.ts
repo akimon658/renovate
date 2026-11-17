@@ -389,6 +389,11 @@ const platform: Platform = {
     );
 
     const number = ticketNumberToPrNumber(result.rkey);
+    if (!Number.isSafeInteger(number) || number <= 0) {
+      throw new Error(
+        `Could not derive a PR number from ticket rkey "${result.rkey}"`,
+      );
+    }
     prNumberToUri.set(number, result.uri);
     prNumberToRkey.set(number, result.rkey);
 

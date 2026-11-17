@@ -655,6 +655,28 @@ describe('modules/platform/tangled/index', () => {
         'PR body',
       );
     });
+
+    it('throws when the ticket rkey yields no PR number', async () => {
+      await initFakeRepo();
+      helperMock.getBranchHead
+        .mockResolvedValueOnce('b'.repeat(40))
+        .mockResolvedValueOnce('a'.repeat(40));
+      helperMock.getMergeBase.mockResolvedValueOnce('a'.repeat(40));
+      helperMock.createPullRecord.mockResolvedValueOnce({
+        uri: 'at://did:plc:repo123/org.tangled.track.ticket/garbage!',
+        cid: 'bafycid',
+        rkey: 'garbage!',
+      });
+
+      await expect(
+        tangled.createPr({
+          sourceBranch: 'renovate/foo-2.x',
+          targetBranch: 'main',
+          prTitle: 'Update foo',
+          prBody: 'PR body',
+        }),
+      ).rejects.toThrow('Could not derive a PR number');
+    });
   });
 
   describe('updatePr()', () => {
