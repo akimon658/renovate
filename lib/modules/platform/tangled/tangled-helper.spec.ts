@@ -39,8 +39,13 @@ import { partial } from '../../../../test/util.ts';
 import * as helper from './tangled-helper.ts';
 
 function invalidSwap(): Error {
-  return Object.assign(new Error('InvalidSwap'), {
-    error: 'InvalidSwap',
+  return Object.assign(new Error('Request failed with status code 409'), {
+    response: {
+      statusCode: 409,
+      body: {
+        error: 'InvalidSwap',
+      },
+    },
   });
 }
 
@@ -387,6 +392,51 @@ describe('modules/platform/tangled/tangled-helper', () => {
 
       await helper.updatePullRecord(repoDid, knotUrl, '92', { title: 'new' });
       expect(httpMocks.postJson).toHaveBeenCalledTimes(2);
+    });
+
+    it('updates title and state in a single write', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'oldcid',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 'old',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'newcid',
+        },
+      });
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.updatePullRecord(repoDid, knotUrl, '92', {
+        title: 'old - autoclosed',
+        state: 'closed',
+      });
+
+      expect(httpMocks.postJson).toHaveBeenCalledTimes(1);
+      const written = httpMocks.postJson.mock.calls[0][1] as {
+        body: { record: Record<string, unknown> };
+      };
+      expect(written.body.record).toMatchObject({
+        state: 'closed',
+        title: {
+          $type: 'org.tangled.markup.markdown#inline',
+          text: 'old - autoclosed',
+        },
+      });
     });
 
     it('strips all x-tngl- ephemeral fields when writing back', async () => {

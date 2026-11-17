@@ -714,12 +714,16 @@ describe('modules/platform/tangled/index', () => {
         state: 'closed',
       });
 
-      expect(helperMock.setPullState).toHaveBeenCalledWith(
+      expect(helperMock.updatePullRecord).toHaveBeenCalledWith(
         'did:plc:repo123',
         'https://knot.example.com',
         mockRkey,
-        'closed',
+        {
+          title: 'title',
+          state: 'closed',
+        },
       );
+      expect(helperMock.setPullState).not.toHaveBeenCalled();
     });
 
     it('should warn when PR number is unknown', async () => {

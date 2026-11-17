@@ -460,17 +460,32 @@ async function putTicketRecord(
  * the record was modified since it was read.
  */
 function isInvalidSwap(err: unknown): boolean {
-  return isObject(err) && (err as { error?: string }).error === 'InvalidSwap';
+  if (!isObject(err)) {
+    return false;
+  }
+  const response = (err as { response?: unknown }).response;
+  if (!isObject(response)) {
+    return false;
+  }
+  const body = (response as { body?: unknown }).body;
+  if (!isObject(body)) {
+    return false;
+  }
+  return (body as { error?: unknown }).error === 'InvalidSwap';
 }
 
 /**
- * Update a pull request ticket (title/body).
+ * Update a pull request ticket (title/body/state) with a single read-modify-write.
  */
 export async function updatePullRecord(
   repoDid: string,
   knotUrl: string,
   rkey: string,
-  updates: { title?: string; body?: string },
+  updates: {
+    title?: string;
+    body?: string;
+    state?: 'open' | 'closed' | 'completed';
+  },
 ): Promise<void> {
   if (!pdsClient) {
     throw new Error('Not authenticated');
@@ -493,6 +508,9 @@ export async function updatePullRecord(
       } else {
         delete record.body;
       }
+    }
+    if (updates.state !== undefined) {
+      record.state = updates.state;
     }
 
     try {

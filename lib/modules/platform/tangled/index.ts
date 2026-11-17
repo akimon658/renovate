@@ -432,27 +432,35 @@ const platform: Platform = {
       return;
     }
 
-    // Update title/body if needed
-    const updates: { title?: string; body?: string } = {};
+    // Update title/body/state with a single read-modify-write so a
+    // concurrent InvalidSwap retry cannot leave a half-updated ticket
+    // (e.g. "- autoclosed" title with state still open).
+    const updates: {
+      title?: string;
+      body?: string;
+      state?: 'open' | 'closed';
+    } = {};
     if (prTitle) {
       updates.title = prTitle;
     }
     if (rawBody !== undefined) {
       updates.body = sanitize(rawBody);
     }
+    if (state === 'closed' || state === 'open') {
+      updates.state = state;
+    }
 
-    if (updates.title || updates.body !== undefined) {
+    if (
+      updates.title !== undefined ||
+      updates.body !== undefined ||
+      updates.state !== undefined
+    ) {
       await helper.updatePullRecord(
         config.repoDid,
         config.knotUrl,
         rkey,
         updates,
       );
-    }
-
-    // Update state if closing
-    if (state === 'closed') {
-      await helper.setPullState(config.repoDid, config.knotUrl, rkey, 'closed');
     }
 
     // Invalidate cache
