@@ -1,9 +1,5 @@
-import { promisify } from 'node:util';
-import { gzip } from 'node:zlib';
-
 const mockGet = vi.fn();
 const mockPost = vi.fn();
-const gzipAsync = promisify(gzip);
 const httpMocks = vi.hoisted(() => ({
   getJsonUnchecked: vi.fn(),
   getText: vi.fn(),
@@ -42,17 +38,17 @@ import {
 import { partial } from '../../../../test/util.ts';
 import * as helper from './tangled-helper.ts';
 
-function recordNotFound(): Error {
-  return Object.assign(new Error('Record not found'), {
-    error: 'RecordNotFound',
+function invalidSwap(): Error {
+  return Object.assign(new Error('InvalidSwap'), {
+    error: 'InvalidSwap',
   });
 }
 
-function invalidSwap(): Error {
-  return Object.assign(new Error('InvalidSwap'), { error: 'InvalidSwap' });
-}
-
 describe('modules/platform/tangled/tangled-helper', () => {
+  const appview = 'https://api.tangled.org/';
+  const repoDid = 'did:plc:repo123';
+  const knotUrl = 'https://knot.example.com';
+
   beforeEach(() => {
     helper.resetHelper();
   });
@@ -90,53 +86,6 @@ describe('modules/platform/tangled/tangled-helper', () => {
         handle: 'bot.bsky.social',
         pdsUrl: 'https://pds.example.com',
       });
-      expect(PasswordSession.login).toHaveBeenCalledWith({
-        service: 'https://bsky.social',
-        identifier: 'bot.bsky.social',
-        password: 'app-password',
-      });
-    });
-  });
-
-  describe('getBotDid / getBotHandle', () => {
-    it('returns empty strings before authentication', () => {
-      expect(helper.getBotDid()).toBe('');
-      expect(helper.getBotHandle()).toBe('');
-    });
-
-    it('returns values after authentication', async () => {
-      const mockSession = {
-        did: 'did:plc:bot123',
-        session: { handle: 'bot.test' },
-        dispatchUrl: 'https://pds.example.com',
-      };
-      vi.mocked(PasswordSession.login).mockResolvedValueOnce(
-        mockSession as any,
-      );
-
-      await helper.createSession('https://bsky.social', 'bot.test', 'pass');
-
-      expect(helper.getBotDid()).toBe('did:plc:bot123');
-      expect(helper.getBotHandle()).toBe('bot.test');
-    });
-  });
-
-  describe('resetHelper', () => {
-    it('clears session state', async () => {
-      const mockSession = {
-        did: 'did:plc:bot123',
-        session: { handle: 'bot.test' },
-        dispatchUrl: 'https://pds.example.com',
-      };
-      vi.mocked(PasswordSession.login).mockResolvedValueOnce(
-        mockSession as any,
-      );
-
-      await helper.createSession('https://bsky.social', 'bot.test', 'pass');
-      helper.resetHelper();
-
-      expect(helper.getBotDid()).toBe('');
-      expect(helper.getBotHandle()).toBe('');
     });
   });
 
@@ -151,15 +100,8 @@ describe('modules/platform/tangled/tangled-helper', () => {
       await authenticate();
       mockGet.mockResolvedValueOnce({ token: 'jwt-token' });
 
-      await expect(
-        helper.getServiceAuth('did:web:knot.example.com'),
-      ).resolves.toBe('jwt-token');
-
-      expect(mockGet).toHaveBeenCalledWith(
-        'com.atproto.server.getServiceAuth',
-        {
-          params: { aud: 'did:web:knot.example.com' },
-        },
+      await expect(helper.getServiceAuth('did:plc:repo123')).resolves.toBe(
+        'jwt-token',
       );
     });
 
@@ -169,141 +111,93 @@ describe('modules/platform/tangled/tangled-helper', () => {
 
       await expect(
         helper.getServiceAuth(
-          'did:web:knot.example.com',
-          'sh.tangled.repo.merge',
+          'did:plc:repo123',
+          'com.atproto.repo.createRecord',
         ),
       ).resolves.toBe('jwt-token');
+    });
+  });
 
-      expect(mockGet).toHaveBeenCalledWith(
-        'com.atproto.server.getServiceAuth',
-        {
-          params: {
-            aud: 'did:web:knot.example.com',
-            lxm: 'sh.tangled.repo.merge',
-          },
-        },
+  describe('getBranchHead', () => {
+    it('fetches the branch head from the index', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { oid: 'a'.repeat(40) },
+      });
+
+      await expect(
+        helper.getBranchHead(repoDid, 'main', appview),
+      ).resolves.toBe('a'.repeat(40));
+
+      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
+        expect.stringContaining('org.tangled.temp.git.getRef'),
       );
+    });
+
+    it('throws when the response has no oid', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: {} });
+      await expect(
+        helper.getBranchHead(repoDid, 'main', appview),
+      ).rejects.toThrow('Could not determine head');
+    });
+  });
+
+  describe('getMergeBase', () => {
+    it('fetches the merge base from the index', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { commit: 'c'.repeat(40) },
+      });
+
+      await expect(
+        helper.getMergeBase(repoDid, 'a'.repeat(40), 'b'.repeat(40), appview),
+      ).resolves.toBe('c'.repeat(40));
     });
   });
 
   describe('getDefaultBranch', () => {
-    it('fetches default branch info from the knotserver', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: { name: 'main', hash: 'abc123' },
-      });
-
-      await expect(
-        helper.getDefaultBranch('knot.example.com', 'did:plc:repo/my-repo'),
-      ).resolves.toEqual({ name: 'main', hash: 'abc123' });
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'https://knot.example.com/xrpc/sh.tangled.repo.getDefaultBranch?',
-        ),
-      );
-    });
-  });
-
-  describe('describeRepo', () => {
-    it('fetches repo info from the knotserver', async () => {
+    it('fetches the default branch from the index', async () => {
       httpMocks.getJsonUnchecked.mockResolvedValueOnce({
         body: {
-          ownerDid: 'did:plc:owner',
-          repoDid: 'did:plc:repo',
-          rkey: 'my-repo',
+          defaultBranch: 'main',
+          branches: [{ name: 'main', oid: 'a'.repeat(40) }],
         },
       });
 
-      await expect(
-        helper.describeRepo('knot.example.com', 'did:plc:owner/my-repo'),
-      ).resolves.toEqual({
-        ownerDid: 'did:plc:owner',
-        repoDid: 'did:plc:repo',
-        rkey: 'my-repo',
+      await expect(helper.getDefaultBranch(repoDid, appview)).resolves.toEqual({
+        name: 'main',
+        hash: 'a'.repeat(40),
       });
+    });
 
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'https://knot.example.com/xrpc/sh.tangled.repo.describeRepo?',
-        ),
+    it('throws when there is no default branch', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: {} });
+      await expect(helper.getDefaultBranch(repoDid, appview)).rejects.toThrow(
+        'Could not determine default branch',
       );
     });
   });
 
   describe('getBlob', () => {
-    it('returns file content from the knotserver', async () => {
+    it('returns file content', async () => {
       httpMocks.getText.mockResolvedValueOnce({ body: 'file content' });
-
       await expect(
-        helper.getBlob(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'package.json',
-        ),
+        helper.getBlob(repoDid, 'main', 'package.json', appview),
       ).resolves.toBe('file content');
     });
 
     it('returns null when the request fails', async () => {
       httpMocks.getText.mockRejectedValueOnce(new Error('not found'));
-
       await expect(
-        helper.getBlob(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'package.json',
-        ),
+        helper.getBlob(repoDid, 'main', 'package.json', appview),
       ).resolves.toBeNull();
     });
   });
 
-  describe('compare', () => {
-    it('returns the raw format-patch from the JSON response', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: { patch: 'patch data' },
-      });
-
+  describe('getFormatPatch', () => {
+    it('returns the format-patch text', async () => {
+      httpMocks.getText.mockResolvedValueOnce({ body: 'patch data' });
       await expect(
-        helper.compare(
-          'knot.example.com',
-          'did:plc:repo/my-repo',
-          'main',
-          'renovate/foo-2.x',
-        ),
+        helper.getFormatPatch(repoDid, 'a'.repeat(40), 'b'.repeat(40), appview),
       ).resolves.toBe('patch data');
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'https://knot.example.com/xrpc/sh.tangled.repo.compare?',
-        ),
-      );
-    });
-  });
-
-  describe('uploadBlob', () => {
-    it('throws when not authenticated', async () => {
-      await expect(helper.uploadBlob(Buffer.from('test'))).rejects.toThrow(
-        'Not authenticated',
-      );
-    });
-
-    it('uploads the blob and returns its reference', async () => {
-      await authenticate();
-      const blobRef = {
-        ref: { $link: 'bafyblob' },
-        mimeType: 'application/gzip',
-        size: 100,
-      };
-      mockPost.mockResolvedValueOnce({ blob: blobRef });
-
-      await expect(helper.uploadBlob(Buffer.from('data'))).resolves.toEqual(
-        blobRef,
-      );
-
-      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.uploadBlob', {
-        input: expect.any(Blob),
-      });
     });
   });
 
@@ -311,639 +205,494 @@ describe('modules/platform/tangled/tangled-helper', () => {
     it('throws when not authenticated', async () => {
       await expect(
         helper.createPullRecord(
-          'did:plc:repo',
+          repoDid,
+          knotUrl,
           'main',
-          'renovate/dep',
+          'renovate/foo',
+          'b'.repeat(40),
+          'a'.repeat(40),
           'title',
           'body',
-          {
-            ref: { $link: 'bafyref' },
-            mimeType: 'application/gzip',
-            size: 100,
-          },
         ),
       ).rejects.toThrow('Not authenticated');
     });
 
-    it('creates a pull record', async () => {
+    it('creates a ticket and submits the first patch', async () => {
       await authenticate();
-      mockPost.mockResolvedValueOnce({
-        uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid123',
-        cid: 'bafycid',
-      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+            cid: 'bafyticket',
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.review.patch/bafypatch`,
+            cid: 'bafypatch',
+          },
+        });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      mockPost.mockResolvedValue({});
 
       const result = await helper.createPullRecord(
-        'did:plc:repo',
+        repoDid,
+        knotUrl,
         'main',
-        'renovate/foo-2.x',
+        'renovate/foo',
+        'b'.repeat(40),
+        'a'.repeat(40),
         'title',
         'body',
-        { ref: { $link: 'bafyref' }, mimeType: 'application/gzip', size: 100 },
       );
 
-      expect(result.uri).toBe('at://did:plc:bot/sh.tangled.repo.pull/tid123');
-      expect(result.cid).toBe('bafycid');
-      expect(result.rkey).toMatch(/^[234567abcdefghijklmnopqrstuvwxyz]{13}$/);
-
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.record).toMatchObject({
-        $type: 'sh.tangled.repo.pull',
-        title: 'title',
-        body: 'body',
-        target: { repo: 'did:plc:repo', branch: 'main' },
-        source: { branch: 'renovate/foo-2.x', repo: undefined },
-      });
+      expect(result.rkey).toBe('92');
+      expect(httpMocks.postJson).toHaveBeenCalledWith(
+        expect.stringContaining('com.atproto.repo.createRecord'),
+        expect.objectContaining({
+          body: expect.objectContaining({ repo: repoDid }),
+        }),
+      );
+      expect(httpMocks.postJson).toHaveBeenCalledWith(
+        expect.stringContaining('org.tangled.review.submitPatch'),
+        expect.anything(),
+      );
+      // Two attestations on the bot PDS
+      expect(mockPost).toHaveBeenCalledTimes(2);
     });
 
-    it('omits empty body and sets fork repo when provided', async () => {
+    it('deletes the ticket when the patch is refused', async () => {
       await authenticate();
-      mockPost.mockResolvedValueOnce({
-        uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid123',
-        cid: 'bafycid',
-      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.track.ticket/93`,
+            cid: 'bafyticket',
+          },
+        })
+        .mockRejectedValueOnce(new Error('patch refused'));
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({ body: {} });
+      mockPost.mockResolvedValue({});
 
-      await helper.createPullRecord(
-        'did:plc:repo',
-        'main',
-        'renovate/foo-2.x',
-        'title',
-        '',
-        { ref: { $link: 'bafyref' }, mimeType: 'application/gzip', size: 100 },
-        'did:plc:fork',
-      );
-
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.record).toMatchObject({
-        title: 'title',
-        target: { repo: 'did:plc:repo', branch: 'main' },
-        source: { branch: 'renovate/foo-2.x', repo: 'did:plc:fork' },
-      });
-      expect(input.record.body).toBeUndefined();
+      await expect(
+        helper.createPullRecord(
+          repoDid,
+          knotUrl,
+          'main',
+          'renovate/foo',
+          'b'.repeat(40),
+          'a'.repeat(40),
+          'title',
+          'body',
+        ),
+      ).rejects.toThrow('patch refused');
     });
   });
 
   describe('updatePullRecord', () => {
     it('throws when not authenticated', async () => {
       await expect(
-        helper.updatePullRecord('rkey', { title: 'new title' }),
+        helper.updatePullRecord(repoDid, knotUrl, '92', { title: 'x' }),
       ).rejects.toThrow('Not authenticated');
     });
 
     it('updates title and body', async () => {
       await authenticate();
-      mockGet.mockResolvedValueOnce({
-        value: { title: 'old title', body: 'old body' },
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'oldcid',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 'old',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'newcid',
+        },
       });
       mockPost.mockResolvedValueOnce({});
 
-      await helper.updatePullRecord('rkey', {
-        title: 'new title',
+      await helper.updatePullRecord(repoDid, knotUrl, '92', {
+        title: 'new',
         body: 'new body',
       });
 
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.record).toEqual({
-        title: 'new title',
-        body: 'new body',
-      });
+      expect(httpMocks.postJson).toHaveBeenCalledWith(
+        expect.stringContaining('com.atproto.repo.putRecord'),
+        expect.objectContaining({
+          body: expect.objectContaining({ repo: repoDid }),
+        }),
+      );
     });
 
-    it('updates title only', async () => {
+    it('retries once on InvalidSwap', async () => {
       await authenticate();
-      mockGet.mockResolvedValueOnce({
-        value: { title: 'old title', body: 'old body' },
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+            cid: 'old',
+            value: {
+              $type: 'org.tangled.track.ticket',
+              title: {
+                $type: 'org.tangled.markup.markdown#inline',
+                text: 'old',
+              },
+              state: 'open',
+              targetBranch: 'main',
+              createdAt: '2025-01-01T00:00:00.000Z',
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+            cid: 'new',
+            value: {
+              $type: 'org.tangled.track.ticket',
+              title: {
+                $type: 'org.tangled.markup.markdown#inline',
+                text: 'old',
+              },
+              state: 'open',
+              targetBranch: 'main',
+              createdAt: '2025-01-01T00:00:00.000Z',
+            },
+          },
+        });
+      mockGet.mockResolvedValue({ token: 'jwt' });
+      httpMocks.postJson
+        .mockRejectedValueOnce(invalidSwap())
+        .mockResolvedValueOnce({
+          body: {
+            uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+            cid: 'newcid2',
+          },
+        });
+      mockPost.mockResolvedValue({});
+
+      await helper.updatePullRecord(repoDid, knotUrl, '92', { title: 'new' });
+      expect(httpMocks.postJson).toHaveBeenCalledTimes(2);
+    });
+
+    it('strips all x-tngl- ephemeral fields when writing back', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'old',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 'old',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
+            'x-tngl-editor': 'did:plc:someone',
+            'x-tngl-future': 'ephemeral',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'newcid',
+        },
       });
       mockPost.mockResolvedValueOnce({});
 
-      await helper.updatePullRecord('rkey', { title: 'new title' });
-
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.record).toEqual({
-        title: 'new title',
-        body: 'old body',
+      await helper.updatePullRecord(repoDid, knotUrl, '92', {
+        title: 'new',
       });
-    });
 
-    it('updates body only and removes it when empty', async () => {
-      await authenticate();
-      mockGet.mockResolvedValueOnce({
-        value: { title: 'old title', body: 'old body' },
-      });
-      mockPost.mockResolvedValueOnce({});
-
-      await helper.updatePullRecord('rkey', { body: '' });
-
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.record).toEqual({
-        title: 'old title',
-        body: undefined,
-      });
-      expect(input.record.body).toBeUndefined();
-    });
-
-    it('uses the record CID as a compare-and-swap precondition', async () => {
-      await authenticate();
-      mockGet.mockResolvedValueOnce({
-        cid: 'bafyold',
-        value: { title: 'old title' },
-      });
-      mockPost.mockResolvedValueOnce({});
-
-      await helper.updatePullRecord('rkey', { title: 'new title' });
-
-      const { input } = mockPost.mock.calls[0][1];
-      expect(input.swapRecord).toBe('bafyold');
-    });
-
-    it('retries once when the record changed concurrently', async () => {
-      await authenticate();
-      mockGet
-        .mockResolvedValueOnce({ cid: 'bafyold', value: { title: 'old' } })
-        .mockResolvedValueOnce({ cid: 'bafynew', value: { title: 'old' } });
-      mockPost.mockRejectedValueOnce(invalidSwap()).mockResolvedValueOnce({});
-
-      await helper.updatePullRecord('rkey', { title: 'new title' });
-
-      expect(mockPost).toHaveBeenCalledTimes(2);
-      expect(mockPost.mock.calls[1][1].input.swapRecord).toBe('bafynew');
-    });
-
-    it('throws when the record keeps changing concurrently', async () => {
-      await authenticate();
-      mockGet.mockResolvedValue({ cid: 'bafyold', value: { title: 'old' } });
-      mockPost.mockRejectedValue(invalidSwap());
-
-      await expect(
-        helper.updatePullRecord('rkey', { title: 'new title' }),
-      ).rejects.toThrow('InvalidSwap');
-
-      expect(mockPost).toHaveBeenCalledTimes(2);
+      const written = httpMocks.postJson.mock.calls[0][1] as {
+        body: { record: Record<string, unknown> };
+      };
+      expect(written.body.record).not.toHaveProperty('x-tngl-editor');
+      expect(written.body.record).not.toHaveProperty('x-tngl-future');
     });
   });
 
   describe('resubmitPull', () => {
-    const patch = 'From abc Mon Sep 17 00:00:00 2001\n\n---\n foo | 1 +\n';
+    const targetHead = 'a'.repeat(40);
+    const sourceHead = 'b'.repeat(40);
 
-    function pullRecord(rounds?: unknown[]): object {
-      return {
-        $type: 'sh.tangled.repo.pull',
-        title: 'title',
-        target: { repo: 'did:plc:repo', branch: 'main' },
-        source: { branch: 'renovate/foo-2.x' },
-        rounds: rounds ?? [
-          {
-            patchBlob: {
-              $type: 'blob',
-              ref: { $link: 'bafystored' },
-              mimeType: 'application/gzip',
-              size: 100,
+    function mockRounds(heads: string[]): void {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          records: heads.map((head, i) => ({
+            uri: `at://${repoDid}/org.tangled.review.patch/p${i}`,
+            cid: `c${i}`,
+            value: {
+              $type: 'org.tangled.review.patch',
+              ticket: '92',
+              base: { oid: targetHead },
+              head: { oid: head },
+              source: { repo: repoDid, branch: 'renovate/foo' },
+              createdAt: '2025-01-01T00:00:00.000Z',
             },
-            createdAt: '2025-01-01T00:00:00.000Z',
-          },
-        ],
-        createdAt: '2025-01-01T00:00:00.000Z',
-      };
-    }
-
-    async function gzipped(value: string): Promise<{ body: Uint8Array }> {
-      return { body: await gzipAsync(Buffer.from(value, 'utf-8')) };
-    }
-
-    it('does nothing when the latest round matches the branch', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
-      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped(patch));
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).resolves.toEqual({ changed: false, resubmitted: false, round: 0 });
-
-      expect(httpMocks.getBuffer).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'https://pds.example.com/xrpc/com.atproto.sync.getBlob?',
-        ),
-      );
-      expect(mockPost).not.toHaveBeenCalled();
-    });
-
-    it('appends a new round when the branch diff changed', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({
-        cid: 'bafycid',
-        value: pullRecord(),
-      });
-      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
-      mockPost
-        .mockResolvedValueOnce({
-          blob: {
-            ref: { $link: 'bafynewblob' },
-            mimeType: 'application/gzip',
-            size: 120,
-          },
-        })
-        .mockResolvedValueOnce({});
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
-
-      expect(mockPost.mock.calls[0][0]).toBe('com.atproto.repo.uploadBlob');
-      const { input } = mockPost.mock.calls[1][1];
-      expect(input.swapRecord).toBe('bafycid');
-      expect(input.record.rounds).toHaveLength(2);
-      expect(input.record.rounds[1]).toMatchObject({
-        patchBlob: { ref: { $link: 'bafynewblob' } },
-      });
-      expect(input.record.title).toBe('title');
-      expect(input.record.target).toEqual({
-        repo: 'did:plc:repo',
-        branch: 'main',
-      });
-    });
-
-    it('writes nothing in dry-run mode', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
-      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-          true,
-        ),
-      ).resolves.toEqual({ changed: true, resubmitted: false, round: 0 });
-
-      expect(mockPost).not.toHaveBeenCalled();
-    });
-
-    it('resubmits when the stored patch cannot be read', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
-      httpMocks.getBuffer.mockRejectedValueOnce(new Error('blob not found'));
-      mockPost
-        .mockResolvedValueOnce({
-          blob: {
-            ref: { $link: 'bafynewblob' },
-            mimeType: 'application/gzip',
-            size: 120,
-          },
-        })
-        .mockResolvedValueOnce({});
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
-    });
-
-    it('resubmits when the record has no rounds', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord([]) });
-      mockPost
-        .mockResolvedValueOnce({
-          blob: {
-            ref: { $link: 'bafynewblob' },
-            mimeType: 'application/gzip',
-            size: 120,
-          },
-        })
-        .mockResolvedValueOnce({});
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).resolves.toEqual({ changed: true, resubmitted: true, round: 0 });
-
-      expect(httpMocks.getBuffer).not.toHaveBeenCalled();
-    });
-
-    it('retries once when the record changed concurrently', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet
-        .mockResolvedValueOnce({ cid: 'bafyold', value: pullRecord() })
-        .mockResolvedValueOnce({ cid: 'bafynew', value: pullRecord() });
-      httpMocks.getBuffer.mockResolvedValue(await gzipped('old patch'));
-      const blob = {
-        blob: {
-          ref: { $link: 'bafynewblob' },
-          mimeType: 'application/gzip',
-          size: 120,
+          })),
         },
-      };
-      mockPost
-        .mockResolvedValueOnce(blob)
-        .mockRejectedValueOnce(invalidSwap())
-        .mockResolvedValueOnce({});
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
-
-      expect(mockPost).toHaveBeenCalledTimes(3);
-      expect(
-        mockPost.mock.calls.filter(
-          ([method]) => method === 'com.atproto.repo.uploadBlob',
-        ),
-      ).toHaveLength(1);
-      expect(mockPost.mock.calls[2][1].input.swapRecord).toBe('bafynew');
-    });
-
-    it('propagates compare failures', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockRejectedValueOnce(new Error('no branch'));
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).rejects.toThrow('no branch');
-    });
-
-    it('propagates unexpected write failures', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValueOnce({ cid: 'bafycid', value: pullRecord() });
-      httpMocks.getBuffer.mockResolvedValueOnce(await gzipped('old patch'));
-      mockPost
-        .mockResolvedValueOnce({
-          blob: {
-            ref: { $link: 'bafynewblob' },
-            mimeType: 'application/gzip',
-            size: 120,
-          },
-        })
-        .mockRejectedValueOnce(new Error('boom'));
-
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).rejects.toThrow('boom');
-
-      expect(mockPost).toHaveBeenCalledTimes(2);
-    });
-
-    it('throws when the record keeps changing concurrently', async () => {
-      await authenticate();
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: { patch } });
-      mockGet.mockResolvedValue({ cid: 'bafycid', value: pullRecord() });
-      httpMocks.getBuffer.mockResolvedValue(await gzipped('old patch'));
-      mockPost.mockImplementation((method: string) => {
-        if (method === 'com.atproto.repo.uploadBlob') {
-          return Promise.resolve({
-            blob: {
-              ref: { $link: 'bafynewblob' },
-              mimeType: 'application/gzip',
-              size: 120,
-            },
-          });
-        }
-        return Promise.reject(invalidSwap());
       });
+    }
 
-      await expect(
-        helper.resubmitPull(
-          'knot.example.com',
-          'did:plc:repo',
-          'main',
-          'renovate/foo-2.x',
-          'rkey',
-        ),
-      ).rejects.toThrow('InvalidSwap');
+    function mockSourceHead(): void {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { oid: sourceHead },
+      });
+    }
 
-      expect(mockPost).toHaveBeenCalledTimes(3);
-    });
-  });
+    function mockTargetHeadAndBase(): void {
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({ body: { oid: targetHead } })
+        .mockResolvedValueOnce({ body: { commit: targetHead } });
+    }
 
-  describe('setPullStatus', () => {
     it('throws when not authenticated', async () => {
       await expect(
-        helper.setPullStatus(
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
-          'sh.tangled.repo.pull.status.closed',
+        helper.resubmitPull(
+          repoDid,
+          knotUrl,
+          appview,
+          'main',
+          'renovate/foo',
+          '92',
         ),
       ).rejects.toThrow('Not authenticated');
     });
 
-    it('creates a status record', async () => {
+    it('does nothing when the latest round matches the branch', async () => {
       await authenticate();
-      mockPost.mockResolvedValueOnce({});
+      mockRounds([sourceHead]);
+      mockSourceHead();
 
-      await helper.setPullStatus(
-        'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        'sh.tangled.repo.pull.status.closed',
-      );
-
-      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.createRecord', {
-        input: {
-          repo: 'did:plc:bot123',
-          collection: 'sh.tangled.repo.pull.status',
-          record: {
-            $type: 'sh.tangled.repo.pull.status',
-            pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid',
-            status: 'sh.tangled.repo.pull.status.closed',
-          },
-        },
-      });
+      await expect(
+        helper.resubmitPull(
+          repoDid,
+          knotUrl,
+          appview,
+          'main',
+          'renovate/foo',
+          '92',
+        ),
+      ).resolves.toEqual({ changed: false, resubmitted: false, round: 0 });
+      expect(httpMocks.postJson).not.toHaveBeenCalled();
+      // No target head or merge base lookup on the no-change path
+      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledTimes(2);
     });
 
-    it('creates a merged status record', async () => {
+    it('submits a new patch when the branch moved', async () => {
       await authenticate();
+      mockRounds(['o'.repeat(40)]);
+      mockSourceHead();
+      mockTargetHeadAndBase();
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.review.patch/new`,
+          cid: 'newcid',
+        },
+      });
       mockPost.mockResolvedValueOnce({});
 
-      await helper.setPullStatus(
-        'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        'sh.tangled.repo.pull.status.merged',
-      );
+      await expect(
+        helper.resubmitPull(
+          repoDid,
+          knotUrl,
+          appview,
+          'main',
+          'renovate/foo',
+          '92',
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: true, round: 1 });
+    });
 
-      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.createRecord', {
-        input: {
-          repo: 'did:plc:bot123',
-          collection: 'sh.tangled.repo.pull.status',
-          record: {
-            $type: 'sh.tangled.repo.pull.status',
-            pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid',
-            status: 'sh.tangled.repo.pull.status.merged',
+    it('writes nothing in dry-run mode', async () => {
+      await authenticate();
+      mockRounds(['o'.repeat(40)]);
+      mockSourceHead();
+
+      await expect(
+        helper.resubmitPull(
+          repoDid,
+          knotUrl,
+          appview,
+          'main',
+          'renovate/foo',
+          '92',
+          true,
+        ),
+      ).resolves.toEqual({ changed: true, resubmitted: false, round: 0 });
+
+      expect(httpMocks.postJson).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setPullState', () => {
+    it('throws when not authenticated', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c',
+          value: { state: 'open' },
+        },
+      });
+      await expect(
+        helper.setPullState(repoDid, knotUrl, '92', 'closed'),
+      ).rejects.toThrow('Not authenticated');
+    });
+
+    it('sets the ticket state', async () => {
+      await authenticate();
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 't',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
           },
         },
       });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c2',
+        },
+      });
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.setPullState(repoDid, knotUrl, '92', 'closed');
+
+      expect(httpMocks.postJson).toHaveBeenCalledWith(
+        expect.stringContaining('com.atproto.repo.putRecord'),
+        expect.anything(),
+      );
     });
   });
 
   describe('listPullRecords', () => {
     it('throws when not authenticated', async () => {
-      await expect(helper.listPullRecords()).rejects.toThrow(
-        'Not authenticated',
-      );
+      // listPullRecords no longer requires PDS auth, but knot reads do not
+      // need the session either; it should still work without auth.
+      httpMocks.getJsonUnchecked
+        .mockResolvedValueOnce({ body: { items: [], cursor: undefined } })
+        .mockResolvedValueOnce({ body: { records: [] } });
+
+      // No auth needed for reads
+      const pulls = await helper.listPullRecords(repoDid, knotUrl, appview);
+      expect(pulls).toEqual([]);
     });
 
-    it('lists pulls across pages and resolves statuses', async () => {
-      await authenticate();
-      mockGet
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid1',
-              cid: 'c1',
-              value: { title: 'one' },
-            },
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid2',
-              cid: 'c2',
-              value: { title: 'two' },
-            },
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid3',
-              cid: 'c3',
-              value: { title: 'three' },
-            },
-          ],
-          cursor: 'next',
-        })
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull/tid4',
-              cid: 'c4',
-              value: { title: 'four' },
-            },
-          ],
-        })
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull.status/s1',
-              cid: 's1',
-              value: {
-                pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid1',
-                status: 'sh.tangled.repo.pull.status.closed',
-              },
-            },
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull.status/s2',
-              cid: 's2',
-              value: {
-                pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid2',
-                status: 'sh.tangled.repo.pull.status.merged',
-              },
-            },
-          ],
-          cursor: 'status-next',
-        })
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull.status/s3',
-              cid: 's3',
-              value: {
-                pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid3',
-                status: 'sh.tangled.repo.pull.status.open',
-              },
-            },
-            {
-              uri: 'at://did:plc:bot/sh.tangled.repo.pull.status/s4',
-              cid: 's4',
-              value: {
-                pull: 'at://did:plc:bot/sh.tangled.repo.pull/tid3',
-                status: 'sh.tangled.repo.pull.status.open',
-              },
-            },
-          ],
-        });
-
-      const pulls = await helper.listPullRecords();
-
-      expect(pulls).toHaveLength(4);
-      const statusByRkey = new Map(pulls.map((p) => [p.rkey, p.status]));
-      expect(statusByRkey.get('tid1')).toBe('closed');
-      expect(statusByRkey.get('tid2')).toBe('merged');
-      expect(statusByRkey.get('tid3')).toBe('open');
-      expect(statusByRkey.get('tid4')).toBe('open');
-
-      expect(mockGet).toHaveBeenNthCalledWith(
-        2,
-        'com.atproto.repo.listRecords',
-        { params: expect.objectContaining({ cursor: 'next' }) },
-      );
-      expect(mockGet).toHaveBeenNthCalledWith(
-        4,
-        'com.atproto.repo.listRecords',
-        { params: expect.objectContaining({ cursor: 'status-next' }) },
-      );
-    });
-  });
-
-  describe('listLabelOps', () => {
-    it('lists label ops across pages', async () => {
+    it('lists pulls across pages and attaches rounds', async () => {
       httpMocks.getJsonUnchecked
         .mockResolvedValueOnce({
           body: {
-            items: [{ value: { subject: 'pull', add: [], delete: [] } }],
+            items: [
+              {
+                uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+                cid: 'c92',
+                value: {
+                  $type: 'org.tangled.track.ticket',
+                  title: {
+                    $type: 'org.tangled.markup.markdown#inline',
+                    text: 'one',
+                  },
+                  state: 'open',
+                  targetBranch: 'main',
+                  createdAt: '2025-01-01T00:00:00.000Z',
+                },
+                state: 'open',
+              },
+              {
+                uri: `at://${repoDid}/org.tangled.track.ticket/93`,
+                cid: 'c93',
+                value: {
+                  $type: 'org.tangled.track.ticket',
+                  title: {
+                    $type: 'org.tangled.markup.markdown#inline',
+                    text: 'issue, no target',
+                  },
+                  state: 'open',
+                  createdAt: '2025-01-01T00:00:00.000Z',
+                },
+                state: 'open',
+              },
+            ],
             cursor: 'next',
           },
         })
         .mockResolvedValueOnce({
           body: {
-            items: [{ value: { subject: 'pull', add: [], delete: [] } }],
+            items: [
+              {
+                uri: `at://${repoDid}/org.tangled.track.ticket/91`,
+                cid: 'c91',
+                value: {
+                  $type: 'org.tangled.track.ticket',
+                  title: {
+                    $type: 'org.tangled.markup.markdown#inline',
+                    text: 'two',
+                  },
+                  state: 'completed',
+                  targetBranch: 'main',
+                  createdAt: '2025-01-01T00:00:00.000Z',
+                },
+                state: 'merged',
+              },
+            ],
+          },
+        })
+        .mockResolvedValueOnce({
+          body: {
+            records: [
+              {
+                uri: `at://${repoDid}/org.tangled.review.patch/p1`,
+                cid: 'cp1',
+                value: {
+                  $type: 'org.tangled.review.patch',
+                  ticket: '92',
+                  base: { oid: 'a'.repeat(40) },
+                  head: { oid: 'b'.repeat(40) },
+                  source: { repo: repoDid, branch: 'renovate/foo' },
+                  createdAt: '2025-01-01T00:00:00.000Z',
+                },
+              },
+            ],
           },
         });
 
-      const ops = await helper.listLabelOps(
-        'https://api.tangled.org/',
-        'at://did:plc:bot/sh.tangled.repo.pull/tid',
-      );
+      const pulls = await helper.listPullRecords(repoDid, knotUrl, appview);
 
-      expect(ops).toHaveLength(2);
-      expect(httpMocks.getJsonUnchecked).toHaveBeenNthCalledWith(
-        2,
-        expect.stringContaining('cursor=next'),
-      );
+      expect(pulls).toHaveLength(2);
+      const byRkey = new Map(pulls.map((p) => [p.rkey, p]));
+      expect(byRkey.get('92')?.status).toBe('open');
+      expect(byRkey.get('92')?.rounds).toHaveLength(1);
+      expect(byRkey.get('91')?.status).toBe('merged');
     });
   });
 
@@ -953,146 +702,51 @@ describe('modules/platform/tangled/tangled-helper', () => {
         body: {
           items: [
             {
-              uri: 'at://did:plc:labeler/sh.tangled.label.definition/abc',
+              uri: `at://${repoDid}/org.tangled.label.definition/rebase`,
               value: { name: 'rebase' },
             },
             {
-              uri: 'at://did:plc:labeler/sh.tangled.label.definition/def',
+              uri: `at://${repoDid}/org.tangled.label.definition/empty`,
               value: { name: '' },
             },
           ],
         },
       });
 
-      const definitions = await helper.listLabelDefinitions(
-        'https://api.tangled.org/',
-        'did:plc:labeler',
-      );
+      const definitions = await helper.listLabelDefinitions(appview, repoDid);
 
       expect(
-        definitions.get('at://did:plc:labeler/sh.tangled.label.definition/abc'),
+        definitions.get(`at://${repoDid}/org.tangled.label.definition/rebase`),
       ).toBe('rebase');
       expect(definitions.size).toBe(1);
     });
   });
 
   describe('getLabels', () => {
-    it('returns no labels when there are no ops', async () => {
+    it('returns no labels when the ticket has none', async () => {
       httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: { items: [] },
+        body: {},
       });
 
       await expect(
         helper.getLabels(
-          'https://api.tangled.org/',
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+          appview,
+          repoDid,
+          `at://${repoDid}/org.tangled.track.ticket/92`,
         ),
       ).resolves.toEqual([]);
     });
 
-    it('returns no labels when every op has been deleted', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          items: [
-            {
-              value: {
-                subject: 'pull',
-                add: [],
-                delete: [
-                  {
-                    key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
-                    value: 'null',
-                  },
-                ],
-                performedAt: '2026-01-01T00:00:00Z',
-              },
-            },
-          ],
-        },
-      });
-
-      await expect(
-        helper.getLabels(
-          'https://api.tangled.org/',
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        ),
-      ).resolves.toEqual([]);
-    });
-
-    it('orders ops by instant across UTC offsets', async () => {
-      const rebase = 'at://did:plc:labeler/sh.tangled.label.definition/rebase';
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          items: [
-            {
-              value: {
-                subject: 'pull',
-                add: [{ key: rebase, value: 'null' }],
-                delete: [],
-                // 06:00 UTC
-                performedAt: '2026-01-01T09:00:00+03:00',
-              },
-            },
-            {
-              value: {
-                subject: 'pull',
-                add: [],
-                delete: [{ key: rebase, value: 'null' }],
-                // 07:00 UTC
-                performedAt: '2026-01-01T07:00:00Z',
-              },
-            },
-          ],
-        },
-      });
-
-      await expect(
-        helper.getLabels(
-          'https://api.tangled.org/',
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        ),
-      ).resolves.toEqual([]);
-    });
-
-    it('replays ops and resolves definition names', async () => {
-      const rebase = 'at://did:plc:labeler/sh.tangled.label.definition/rebase';
-      const keep = 'at://did:plc:labeler/sh.tangled.label.definition/keep';
+    it('resolves label tokens to names', async () => {
       httpMocks.getJsonUnchecked
         .mockResolvedValueOnce({
-          body: {
-            items: [
-              {
-                value: {
-                  subject: 'pull',
-                  add: [{ key: rebase, value: 'null' }],
-                  delete: [],
-                  performedAt: '2026-01-02T00:00:00Z',
-                },
-              },
-              {
-                value: {
-                  subject: 'pull',
-                  add: [{ key: keep, value: 'null' }],
-                  delete: [],
-                  performedAt: '2026-01-01T00:00:00Z',
-                },
-              },
-              {
-                value: {
-                  subject: 'pull',
-                  add: [],
-                  delete: [{ key: keep, value: 'null' }],
-                  performedAt: '2026-01-03T00:00:00Z',
-                },
-              },
-            ],
-          },
+          body: { tangledLabels: [{ key: 'rebase' }] },
         })
         .mockResolvedValueOnce({
           body: {
             items: [
               {
-                uri: rebase,
+                uri: `at://${repoDid}/org.tangled.label.definition/rebase`,
                 value: { name: 'rebase' },
               },
             ],
@@ -1101,152 +755,176 @@ describe('modules/platform/tangled/tangled-helper', () => {
 
       await expect(
         helper.getLabels(
-          'https://api.tangled.org/',
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
+          appview,
+          repoDid,
+          `at://${repoDid}/org.tangled.track.ticket/92`,
         ),
-      ).resolves.toEqual([{ key: rebase, value: 'null', name: 'rebase' }]);
+      ).resolves.toEqual([
+        {
+          key: `at://${repoDid}/org.tangled.label.definition/rebase`,
+          value: '',
+          name: 'rebase',
+        },
+      ]);
     });
+  });
 
-    it('falls back to the definition rkey when unnamed', async () => {
-      const unknown = 'at://did:plc:labeler/sh.tangled.label.definition/xyz';
-      httpMocks.getJsonUnchecked
-        .mockResolvedValueOnce({
-          body: {
-            items: [
-              {
-                value: {
-                  subject: 'pull',
-                  add: [{ key: unknown, value: 'null' }],
-                  delete: [],
-                  performedAt: '2026-01-01T00:00:00Z',
-                },
-              },
-            ],
-          },
-        })
-        .mockResolvedValueOnce({ body: { items: [] } });
+  describe('removeLabel', () => {
+    it('returns false when the label does not exist', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { items: [] },
+      });
 
       await expect(
-        helper.getLabels(
-          'https://api.tangled.org/',
-          'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        ),
-      ).resolves.toEqual([{ key: unknown, value: 'null', name: 'xyz' }]);
-    });
-  });
-
-  describe('createLabelOp', () => {
-    it('throws when not authenticated', async () => {
-      await expect(helper.createLabelOp('at://pull', [], [])).rejects.toThrow(
-        'Not authenticated',
-      );
+        helper.removeLabel(repoDid, knotUrl, appview, '92', 'rebase'),
+      ).resolves.toBe(false);
     });
 
-    it('creates a label op record in the bot PDS', async () => {
+    it('removes the label token from the ticket', async () => {
       await authenticate();
-      mockPost.mockResolvedValueOnce({});
-
-      await helper.createLabelOp(
-        'at://did:plc:bot/sh.tangled.repo.pull/tid',
-        [
-          {
-            key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
-            value: 'null',
-          },
-        ],
-        [],
-      );
-
-      expect(mockPost).toHaveBeenCalledWith('com.atproto.repo.createRecord', {
-        input: {
-          repo: 'did:plc:bot123',
-          collection: 'sh.tangled.label.op',
-          record: expect.objectContaining({
-            $type: 'sh.tangled.label.op',
-            subject: 'at://did:plc:bot/sh.tangled.repo.pull/tid',
-            add: [
-              {
-                key: 'at://did:plc:labeler/sh.tangled.label.definition/rebase',
-                value: 'null',
-              },
-            ],
-            delete: [],
-          }),
-        },
-      });
-    });
-  });
-
-  describe('mergePull', () => {
-    it('merges a pull via the knotserver', async () => {
-      await authenticate();
-      mockGet.mockResolvedValueOnce({ token: 'jwt-token' });
-      httpMocks.postJson.mockResolvedValueOnce({});
-
-      await helper.mergePull(
-        'knot.example.com',
-        'did:plc:repo',
-        'did:plc:owner',
-        'my-repo',
-        'main',
-        'patch',
-      );
-
-      expect(mockGet).toHaveBeenCalledWith(
-        'com.atproto.server.getServiceAuth',
-        {
-          params: {
-            aud: 'did:web:knot.example.com',
-            lxm: 'sh.tangled.repo.merge',
-          },
-        },
-      );
-      expect(httpMocks.postJson).toHaveBeenCalledWith(
-        'https://knot.example.com/xrpc/sh.tangled.repo.merge',
-        {
-          body: {
-            repo: 'did:plc:repo',
-            did: 'did:plc:owner',
-            name: 'my-repo',
-            branch: 'main',
-            patch: 'patch',
-          },
-          headers: { Authorization: 'Bearer jwt-token' },
-        },
-      );
-    });
-  });
-
-  describe('resolveHandle', () => {
-    it('resolves a handle to a DID', async () => {
-      mockGet.mockResolvedValueOnce({ did: 'did:plc:resolved' });
-
-      const did = await helper.resolveHandle('user.bsky.social');
-      expect(did).toBe('did:plc:resolved');
-    });
-  });
-
-  describe('resolvePdsForHandle', () => {
-    it('resolves a handle to its PDS endpoint', async () => {
-      mockGet.mockResolvedValueOnce({ did: 'did:plc:resolved' });
       httpMocks.getJsonUnchecked.mockResolvedValueOnce({
         body: {
-          service: [
+          items: [
             {
-              id: '#atproto_pds',
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: 'https://pds.example.com',
+              uri: `at://${repoDid}/org.tangled.label.definition/rebase`,
+              value: { name: 'rebase' },
             },
           ],
         },
       });
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 't',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            tangledLabels: [{ key: 'rebase' }],
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c2',
+        },
+      });
+      mockPost.mockResolvedValueOnce({});
 
       await expect(
-        helper.resolvePdsForHandle('user.bsky.social'),
-      ).resolves.toEqual({
-        did: 'did:plc:resolved',
-        pdsUrl: 'https://pds.example.com',
+        helper.removeLabel(repoDid, knotUrl, appview, '92', 'rebase'),
+      ).resolves.toBe(true);
+    });
+  });
+
+  describe('mergePull', () => {
+    it('merges via the index and completes the ticket', async () => {
+      await authenticate();
+      // listRounds
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          records: [
+            {
+              uri: `at://${repoDid}/org.tangled.review.patch/p1`,
+              cid: 'c1',
+              value: {
+                $type: 'org.tangled.review.patch',
+                ticket: '92',
+                base: { oid: 'a'.repeat(40) },
+                head: { oid: 'b'.repeat(40) },
+                source: { repo: repoDid, branch: 'renovate/foo' },
+                createdAt: '2025-01-01T00:00:00.000Z',
+              },
+            },
+          ],
+        },
       });
+      // getBranchHead
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: { oid: 'a'.repeat(40) },
+      });
+      // merge POST
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({ body: {} });
+      // setPullState: getTicket + putTicket
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c',
+          value: {
+            $type: 'org.tangled.track.ticket',
+            title: {
+              $type: 'org.tangled.markup.markdown#inline',
+              text: 't',
+            },
+            state: 'open',
+            targetBranch: 'main',
+            createdAt: '2025-01-01T00:00:00.000Z',
+          },
+        },
+      });
+      mockGet.mockResolvedValueOnce({ token: 'jwt' });
+      httpMocks.postJson.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.track.ticket/92`,
+          cid: 'c2',
+        },
+      });
+      mockPost.mockResolvedValueOnce({});
+
+      await helper.mergePull(
+        repoDid,
+        knotUrl,
+        'knot.example.com',
+        appview,
+        'main',
+        '92',
+      );
+
+      expect(httpMocks.postJson).toHaveBeenCalledWith(
+        expect.stringContaining('sh.tangled.git.mergeCommit'),
+        expect.objectContaining({
+          body: expect.objectContaining({ style: 'rebase' }),
+        }),
+      );
+    });
+  });
+
+  describe('resolveRepoRef', () => {
+    it('resolves a repo via the index', async () => {
+      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
+        body: {
+          uri: `at://${repoDid}/org.tangled.repo.manifest/self`,
+          knot: 'knot.example.com',
+          value: { declaration: { name: 'my-repo' } },
+          defaultBranch: 'main',
+        },
+      });
+
+      await expect(
+        helper.resolveRepoRef('did:plc:owner', 'my-repo', appview),
+      ).resolves.toEqual({
+        knot: 'knot.example.com',
+        knotUrl: 'https://knot.example.com',
+        repoDid,
+        name: 'my-repo',
+        defaultBranch: 'main',
+      });
+    });
+
+    it('throws when the repo cannot be found', async () => {
+      httpMocks.getJsonUnchecked.mockRejectedValueOnce(new Error('nope'));
+
+      await expect(
+        helper.resolveRepoRef('did:plc:owner', 'missing', appview),
+      ).rejects.toThrow('was not found');
     });
   });
 
@@ -1267,76 +945,6 @@ describe('modules/platform/tangled/tangled-helper', () => {
       await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
         'https://pds.example.com',
       );
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        'https://plc.directory/did:plc:owner',
-      );
-    });
-
-    it('resolves a did:web through its DID document', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              id: '#atproto_pds',
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: 'https://web-pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(
-        helper.resolvePdsEndpoint('did:web:example.com'),
-      ).resolves.toBe('https://web-pds.example.com');
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        'https://example.com/.well-known/did.json',
-      );
-    });
-
-    it('resolves a did:web with path segments', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              id: '#atproto_pds',
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: 'https://web-pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(
-        helper.resolvePdsEndpoint('did:web:example.com:user:alice'),
-      ).resolves.toBe('https://web-pds.example.com');
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        'https://example.com/user/alice/did.json',
-      );
-    });
-
-    it('resolves a did:web with an encoded port', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              id: '#atproto_pds',
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: 'https://web-pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(
-        helper.resolvePdsEndpoint('did:web:example.com%3A3000'),
-      ).resolves.toBe('https://web-pds.example.com');
-
-      expect(httpMocks.getJsonUnchecked).toHaveBeenCalledWith(
-        'https://example.com:3000/.well-known/did.json',
-      );
     });
 
     it('falls back to the bsky AppView when resolution fails', async () => {
@@ -1345,276 +953,6 @@ describe('modules/platform/tangled/tangled-helper', () => {
       await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
         'https://public.api.bsky.app',
       );
-    });
-
-    it('falls back without a request for unsupported DID methods', async () => {
-      await expect(helper.resolvePdsEndpoint('did:key:z6Mk')).resolves.toBe(
-        'https://public.api.bsky.app',
-      );
-
-      expect(httpMocks.getJsonUnchecked).not.toHaveBeenCalled();
-    });
-
-    it('matches a PDS service by its type', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              type: 'AtprotoPersonalDataServer',
-              serviceEndpoint: 'https://typed-pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
-        'https://typed-pds.example.com',
-      );
-    });
-
-    it('matches a PDS service by a fully-qualified id', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              id: 'did:plc:owner#atproto_pds',
-              serviceEndpoint: 'https://fq-pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
-        'https://fq-pds.example.com',
-      );
-    });
-
-    it('ignores services that are not the PDS', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({
-        body: {
-          service: [
-            {
-              type: 'AtprotoLabeler',
-              serviceEndpoint: 'https://labeler.example.com',
-            },
-            {
-              id: 'did:plc:owner#atproto_pds',
-              serviceEndpoint: 'https://pds.example.com',
-            },
-          ],
-        },
-      });
-
-      await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
-        'https://pds.example.com',
-      );
-    });
-
-    it('falls back when no PDS service is present', async () => {
-      httpMocks.getJsonUnchecked.mockResolvedValueOnce({ body: {} });
-
-      await expect(helper.resolvePdsEndpoint('did:plc:owner')).resolves.toBe(
-        'https://public.api.bsky.app',
-      );
-    });
-  });
-
-  describe('resolveRepoRef', () => {
-    it('resolves a repo whose rkey matches its name', async () => {
-      mockGet.mockResolvedValueOnce({
-        value: {
-          knot: 'knot.example.com',
-          repoDid: 'did:plc:repo',
-          name: 'my-repo',
-        },
-      });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).resolves.toEqual({
-        knot: 'knot.example.com',
-        repoDid: 'did:plc:repo',
-        name: 'my-repo',
-        rkey: 'my-repo',
-      });
-
-      expect(mockGet).toHaveBeenCalledWith('com.atproto.repo.getRecord', {
-        params: {
-          repo: 'did:plc:owner',
-          collection: 'sh.tangled.repo',
-          rkey: 'my-repo',
-        },
-      });
-    });
-
-    it('falls back to the requested name when the record has no name', async () => {
-      mockGet.mockResolvedValueOnce({
-        value: { knot: 'knot.example.com', repoDid: 'did:plc:repo' },
-      });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).resolves.toEqual({
-        knot: 'knot.example.com',
-        repoDid: 'did:plc:repo',
-        name: 'my-repo',
-        rkey: 'my-repo',
-      });
-    });
-
-    it('falls back to listRecords when the name is not the rkey', async () => {
-      mockGet.mockRejectedValueOnce(recordNotFound()).mockResolvedValueOnce({
-        records: [
-          {
-            uri: 'at://did:plc:owner/sh.tangled.repo/tid123',
-            cid: 'c1',
-            value: { name: 'other-repo', knot: 'knot.example.com' },
-          },
-          {
-            uri: 'at://did:plc:owner/sh.tangled.repo/tid456',
-            cid: 'c2',
-            value: {
-              name: 'my-repo',
-              knot: 'knot.example.com',
-              repoDid: 'did:plc:repo',
-            },
-          },
-        ],
-      });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).resolves.toEqual({
-        knot: 'knot.example.com',
-        repoDid: 'did:plc:repo',
-        name: 'my-repo',
-        rkey: 'tid456',
-      });
-    });
-
-    it('paginates listRecords while searching', async () => {
-      mockGet
-        .mockRejectedValueOnce(recordNotFound())
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:owner/sh.tangled.repo/tid1',
-              cid: 'c1',
-              value: { name: 'other', knot: 'knot.example.com' },
-            },
-          ],
-          cursor: 'next',
-        })
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:owner/sh.tangled.repo/tid2',
-              cid: 'c2',
-              value: { name: 'my-repo', knot: 'knot.example.com' },
-            },
-          ],
-        });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).resolves.toEqual({
-        knot: 'knot.example.com',
-        repoDid: '',
-        name: 'my-repo',
-        rkey: 'tid2',
-      });
-
-      expect(mockGet).toHaveBeenNthCalledWith(
-        3,
-        'com.atproto.repo.listRecords',
-        {
-          params: {
-            repo: 'did:plc:owner',
-            collection: 'sh.tangled.repo',
-            limit: 100,
-            cursor: 'next',
-          },
-        },
-      );
-    });
-
-    it('throws when the repo cannot be found', async () => {
-      mockGet
-        .mockRejectedValueOnce(recordNotFound())
-        .mockResolvedValueOnce({ records: [] });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'missing'),
-      ).rejects.toThrow('Tangled repository "missing" was not found');
-    });
-
-    it('falls back to listRecords when the direct record was renamed', async () => {
-      mockGet
-        .mockResolvedValueOnce({
-          value: {
-            knot: 'knot.example.com',
-            repoDid: 'did:plc:repo',
-            name: 'new-name',
-          },
-        })
-        .mockResolvedValueOnce({
-          records: [
-            {
-              uri: 'at://did:plc:owner/sh.tangled.repo/my-repo',
-              cid: 'c1',
-              value: {
-                name: 'my-repo',
-                knot: 'knot.example.com',
-                repoDid: 'did:plc:repo',
-              },
-            },
-          ],
-        });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).resolves.toEqual({
-        knot: 'knot.example.com',
-        repoDid: 'did:plc:repo',
-        name: 'my-repo',
-        rkey: 'my-repo',
-      });
-
-      expect(mockGet).toHaveBeenNthCalledWith(
-        2,
-        'com.atproto.repo.listRecords',
-        expect.anything(),
-      );
-    });
-
-    it('rethrows non-RecordNotFound errors from the direct lookup', async () => {
-      mockGet.mockRejectedValueOnce(
-        Object.assign(new Error('boom'), { status: 500 }),
-      );
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).rejects.toThrow('boom');
-
-      expect(mockGet).toHaveBeenCalledTimes(1);
-    });
-
-    it('throws when the direct record is null', async () => {
-      mockGet.mockResolvedValueOnce({ value: null });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).rejects.toThrow('Could not determine knot host');
-    });
-
-    it('throws when the knot field is missing', async () => {
-      mockGet.mockResolvedValueOnce({
-        value: { name: 'my-repo' },
-      });
-
-      await expect(
-        helper.resolveRepoRef('did:plc:owner', 'my-repo'),
-      ).rejects.toThrow('Could not determine knot host');
     });
   });
 });

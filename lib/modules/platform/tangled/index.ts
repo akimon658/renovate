@@ -1,4 +1,3 @@
-import { gzipSync } from 'node:zlib';
 import { DateTime } from 'luxon';
 import { GlobalConfig } from '../../../config/global.ts';
 import { logger } from '../../../logger/index.ts';
@@ -31,7 +30,7 @@ import { repoFingerprint } from '../util.ts';
 import { smartTruncate } from '../utils/pr-body.ts';
 import * as helper from './tangled-helper.ts';
 import type { TangledLabel, TangledPull, TangledRepoConfig } from './types.ts';
-import { tidToNumber, toRenovatePr } from './utils.ts';
+import { ticketNumberToPrNumber, toRenovatePr } from './utils.ts';
 
 export const id = 'tangled';
 
@@ -45,7 +44,7 @@ let config: TangledRepoConfig = {} as any;
 let cachedPrList: Pr[] | null = null;
 // Map from derived PR number → AT-URI for lookup
 const prNumberToUri = new Map<number, string>();
-// Map from derived PR number → rkey (TID) for record operations
+// Map from derived PR number → rkey (ticket number) for record operations
 const prNumberToRkey = new Map<number, string>();
 // Map from derived PR number → currently applied labels
 const prNumberToLabels = new Map<number, TangledLabel[]>();
@@ -79,11 +78,6 @@ async function buildPrCache(pulls: TangledPull[]): Promise<Pr[]> {
 
   const prs: Pr[] = [];
   for (const pull of pulls) {
-    // Only include PRs targeting the current repository
-    if (pull.record.target.repo !== config.repoDid) {
-      continue;
-    }
-
     const pr = toRenovatePr(pull);
     if (pr) {
       prNumberToUri.set(pr.number, pull.uri);
@@ -92,9 +86,9 @@ async function buildPrCache(pulls: TangledPull[]): Promise<Pr[]> {
     }
   }
 
-  // Labels are stored as operations in each actor's PDS and aggregated by the
-  // appview, so they need a separate lookup. Only open PRs need them, for
-  // rebase/keep-updated handling. Failures are non-fatal.
+  // Labels live on the ticket itself; resolve names via the index.
+  // Only open PRs need them, for rebase/keep-updated handling.
+  // Failures are non-fatal.
   await Promise.all(
     prs
       .filter((pr) => pr.state === 'open')
@@ -102,7 +96,7 @@ async function buildPrCache(pulls: TangledPull[]): Promise<Pr[]> {
         const uri = prNumberToUri.get(pr.number)!;
         try {
           const labels = coerceArray(
-            await helper.getLabels(defaults.appview, uri),
+            await helper.getLabels(defaults.appview, config.repoDid, uri),
           );
           prNumberToLabels.set(pr.number, labels);
           pr.labels = labels.map((label) => label.name);
@@ -137,7 +131,7 @@ const platform: Platform = {
       throw new Error('Init: You must configure gitAuthor for Tangled');
     }
 
-    // The Bobbin API appview serves indexed reads (e.g. labels).
+    // The index (Bobbin) serves indexed reads (repos, pulls, git).
     defaults.appview = ensureTrailingSlash(
       tangledAppviewUrl ?? defaults.appview,
     );
@@ -201,7 +195,12 @@ const platform: Platform = {
     }
 
     const ref = branchOrTag ?? config.defaultBranch;
-    return await helper.getBlob(config.knotHost, config.repoDid, ref, fileName);
+    return await helper.getBlob(
+      config.repoDid,
+      ref,
+      fileName,
+      defaults.appview,
+    );
   },
 
   async getJsonFile(
@@ -238,43 +237,49 @@ const platform: Platform = {
     const ownerDid = await helper.resolveHandle(ownerHandle);
     config.ownerDid = ownerDid;
 
-    // Resolve the sh.tangled.repo record from the owner's PDS
-    const repoRef = await helper.resolveRepoRef(ownerDid, repoName);
+    // Resolve the repository via the index
+    const repoRef = await helper.resolveRepoRef(
+      ownerDid,
+      repoName,
+      defaults.appview,
+    );
     config.knotHost = repoRef.knot;
+    config.knotUrl = repoRef.knotUrl;
 
-    // The knot API only accepts a repo DID, so we cannot continue without one
+    // The index API only accepts a repo DID, so we cannot continue without one
     if (!repoRef.repoDid) {
       throw new Error(`Could not determine repo DID for ${repository}`);
     }
+    config.repoDid = repoRef.repoDid;
 
-    // Get the canonical repo DID and rkey from the knotserver
-    const repoInfo = await helper.describeRepo(repoRef.knot, repoRef.repoDid);
-    config.repoDid = repoInfo.repoDid || repoRef.repoDid;
-    config.knotRkey = repoInfo.rkey || repoRef.rkey || repoName;
-
-    // Get the default branch
-    const branchInfo = await helper.getDefaultBranch(
-      repoRef.knot,
-      config.repoDid,
-    );
-    config.defaultBranch = branchInfo.name;
+    // Get the default branch (prefer the value from repo resolution)
+    if (repoRef.defaultBranch) {
+      config.defaultBranch = repoRef.defaultBranch;
+    } else {
+      const branchInfo = await helper.getDefaultBranch(
+        config.repoDid,
+        defaults.appview,
+      );
+      config.defaultBranch = branchInfo.name;
+    }
 
     logger.debug(
       {
         repository,
         ownerDid,
         repoDid: config.repoDid,
-        knotHost: repoRef.knot,
+        knotHost: config.knotHost,
         defaultBranch: config.defaultBranch,
       },
       'Tangled repo initialized',
     );
 
-    // Initialize git with an SSH URL to the configured knotserver host.
+    // Initialize git with an SSH URL. The DID form keeps working after
+    // renames; see https://tangled.org/docs/reference/identifiers/
     const sshUrl =
       defaults.sshPort === 22
-        ? `git@${defaults.sshHost}:${ownerDid}/${config.knotRkey}`
-        : `ssh://git@${defaults.sshHost}:${defaults.sshPort}/${ownerDid}/${config.knotRkey}`;
+        ? `git@${defaults.sshHost}:${config.repoDid}`
+        : `ssh://git@${defaults.sshHost}:${defaults.sshPort}/${config.repoDid}`;
     await git.initRepo({
       url: sshUrl,
       defaultBranch: config.defaultBranch,
@@ -301,7 +306,11 @@ const platform: Platform = {
       return cachedPrList;
     }
 
-    const pulls = await helper.listPullRecords();
+    const pulls = await helper.listPullRecords(
+      config.repoDid,
+      config.knotUrl,
+      defaults.appview,
+    );
     cachedPrList = await buildPrCache(pulls);
     logger.debug(
       `Retrieved ${cachedPrList.length} PRs for ${config.repository}`,
@@ -321,12 +330,12 @@ const platform: Platform = {
   }: FindPRConfig): Promise<Pr | null> {
     logger.debug(`findPr(${branchName}, ${title!}, ${state})`);
     const prList = await platform.getPrList();
-    const pr = prList.find(
-      (p) =>
-        p.sourceBranch === branchName &&
-        matchesState(p.state, state) &&
-        (!title || p.title === title),
-    );
+    const pr = prList.find((p) => {
+      const branchMatches = p.sourceBranch === branchName;
+      const stateMatches = matchesState(p.state, state);
+      const titleMatches = !title || p.title === title;
+      return branchMatches && stateMatches && titleMatches;
+    });
 
     if (pr) {
       logger.debug(`Found PR #${pr.number}`);
@@ -353,29 +362,38 @@ const platform: Platform = {
       `Creating pull request: ${prTitle} (${sourceBranch} => ${targetBranch})`,
     );
 
-    // Step 1: Get the format-patch from the knotserver
-    const patch = await helper.compare(
-      config.knotHost,
+    // Resolve both branch heads from the index, then the merge base.
+    // The knot fetches the head itself on submitPatch, so the branch must
+    // already be pushed.
+    const [sourceHead, targetHead] = await Promise.all([
+      helper.getBranchHead(config.repoDid, sourceBranch, defaults.appview),
+      helper.getBranchHead(config.repoDid, targetBranch, defaults.appview),
+    ]);
+    const base = await helper.getMergeBase(
       config.repoDid,
-      targetBranch,
-      sourceBranch,
+      targetHead,
+      sourceHead,
+      defaults.appview,
     );
 
-    // Step 2: Compress the patch and upload as a blob
-    const gzipped = gzipSync(Buffer.from(patch, 'utf-8'));
-    const blobRef = await helper.uploadBlob(gzipped);
-
-    // Step 3: Create the pull record in the PDS
+    // Create the ticket and its first round on the knot.
     const result = await helper.createPullRecord(
       config.repoDid,
+      config.knotUrl,
       targetBranch,
       sourceBranch,
+      sourceHead,
+      base,
       prTitle,
       body,
-      blobRef,
     );
 
-    const number = tidToNumber(result.rkey);
+    const number = ticketNumberToPrNumber(result.rkey);
+    if (!Number.isSafeInteger(number) || number <= 0) {
+      throw new Error(
+        `Could not derive a PR number from ticket rkey "${result.rkey}"`,
+      );
+    }
     prNumberToUri.set(number, result.uri);
     prNumberToRkey.set(number, result.rkey);
 
@@ -424,12 +442,17 @@ const platform: Platform = {
     }
 
     if (updates.title || updates.body !== undefined) {
-      await helper.updatePullRecord(rkey, updates);
+      await helper.updatePullRecord(
+        config.repoDid,
+        config.knotUrl,
+        rkey,
+        updates,
+      );
     }
 
-    // Update status if closing
+    // Update state if closing
     if (state === 'closed') {
-      await helper.setPullStatus(uri, 'sh.tangled.repo.pull.status.closed');
+      await helper.setPullState(config.repoDid, config.knotUrl, rkey, 'closed');
     }
 
     // Invalidate cache
@@ -439,9 +462,9 @@ const platform: Platform = {
   /**
    * Sync the PR's latest round with the source branch after it was updated.
    *
-   * Tangled pull requests are patch snapshots, so pushing to the source branch
-   * does not update what reviewers see. Resubmitting appends a new round when
-   * the branch diff changed, which is what makes rebases visible on the PR.
+   * Tangled pull requests are patch snapshots: pushing to the source branch
+   * does not update what reviewers see. Submitting a new patch when the
+   * branch head moved is what makes rebases visible on the PR.
    */
   async refreshPr(number: number): Promise<void> {
     logger.debug(`refreshPr(${number})`);
@@ -459,7 +482,7 @@ const platform: Platform = {
     if (pr?.state !== 'open') {
       return;
     }
-    // Fork-based PRs cannot be compared against the target knot
+    // Fork-based PRs are same-repo only for merges; skip resubmit.
     if (pr.sourceRepo && pr.sourceRepo !== config.repoDid) {
       logger.debug({ number }, 'Skipping refresh of fork-based PR');
       return;
@@ -467,8 +490,9 @@ const platform: Platform = {
 
     try {
       const result = await helper.resubmitPull(
-        config.knotHost,
         config.repoDid,
+        config.knotUrl,
+        defaults.appview,
         pr.targetBranch!,
         pr.sourceBranch,
         rkey,
@@ -500,33 +524,22 @@ const platform: Platform = {
     }
 
     try {
-      // Get the PR to find the source branch
+      // Get the PR to find the target branch
       const pr = await platform.getPr(number);
       if (!pr) {
         logger.warn({ number }, 'Cannot merge PR - PR not found');
         return false;
       }
 
-      // Get the patch from the knotserver
-      const patch = await helper.compare(
-        config.knotHost,
-        config.repoDid,
-        pr.targetBranch!,
-        pr.sourceBranch,
-      );
-
-      // Merge via the knotserver
+      // Merge via the index (rebase), then mark the ticket completed
       await helper.mergePull(
-        config.knotHost,
         config.repoDid,
-        config.ownerDid,
-        config.knotRkey,
+        config.knotUrl,
+        config.knotHost,
+        defaults.appview,
         pr.targetBranch!,
-        patch,
+        rkey,
       );
-
-      // Set PR status to merged
-      await helper.setPullStatus(uri, 'sh.tangled.repo.pull.status.merged');
 
       // Invalidate cache
       cachedPrList = null;
@@ -566,9 +579,9 @@ const platform: Platform = {
 
   async deleteLabel(number: number, label: string): Promise<void> {
     logger.debug(`deleteLabel(${number}, ${label})`);
-    const uri = prNumberToUri.get(number);
-    if (!uri) {
-      logger.warn({ number }, 'Cannot delete label - PR URI not found');
+    const rkey = prNumberToRkey.get(number);
+    if (!rkey) {
+      logger.warn({ number }, 'Cannot delete label - PR rkey not found');
       return;
     }
 
@@ -580,17 +593,21 @@ const platform: Platform = {
     }
 
     try {
-      await helper.createLabelOp(
-        uri,
-        [],
-        target.map((entry) => ({ key: entry.key, value: entry.value })),
+      const removed = await helper.removeLabel(
+        config.repoDid,
+        config.knotUrl,
+        defaults.appview,
+        rkey,
+        label,
       );
-      prNumberToLabels.set(
-        number,
-        applied.filter((entry) => entry.name !== label),
-      );
-      // Invalidate the cache so the next read reflects the removal.
-      cachedPrList = null;
+      if (removed) {
+        prNumberToLabels.set(
+          number,
+          applied.filter((entry) => entry.name !== label),
+        );
+        // Invalidate the cache so the next read reflects the removal.
+        cachedPrList = null;
+      }
     } catch (err) {
       logger.warn({ err, number, label }, 'Failed to delete label');
     }
@@ -623,9 +640,9 @@ const platform: Platform = {
   },
 
   massageMarkdown(prBody: string, rebaseLabel = 'rebase'): string {
-    // Tangled PR records live in the author's PDS, so only Renovate can edit
-    // the body or title. Replace the unusable rebase/retry checkbox with the
-    // label maintainers can apply instead.
+    // Tangled PR records live in the repository account on the knot, so only
+    // Renovate can edit the body or title. Replace the unusable rebase/retry
+    // checkbox with the label maintainers can apply instead.
     return smartTruncate(prBody, platform.maxBodyLength())
       .replace(
         'you tick the rebase/retry checkbox',

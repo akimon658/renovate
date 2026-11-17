@@ -145,10 +145,10 @@
     "pnpm": "^11.0.0"
   },
   "dependencies": {
-    "@atcute/atproto": "4.0.1",
+    "@atcute/atproto": "4.0.5",
     "@atcute/client": "5.0.0",
     "@atcute/password-session": "1.0.0",
-    "@atcute/tangled": "2.0.3",
+    "@atcute/tangled": "3.0.0",
     "@aws-sdk/client-codecommit": "3.1139.0",
     "@aws-sdk/client-ec2": "3.1139.0",
     "@aws-sdk/client-ecr": "3.1139.0",

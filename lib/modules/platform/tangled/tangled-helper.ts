@@ -1,22 +1,24 @@
-import { gunzipSync, gzipSync } from 'node:zlib';
 import type {} from '@atcute/atproto';
 import { Client, ok, simpleFetchHandler } from '@atcute/client';
 import { PasswordSession } from '@atcute/password-session';
 import type {
-  ShTangledLabelDefinition,
-  ShTangledLabelOp,
-  ShTangledRepoPull,
+  OrgTangledReviewPatch,
+  OrgTangledTrackTicket,
 } from '@atcute/tangled';
-import { isObject, isTruthy } from '@sindresorhus/is';
+import { isObject } from '@sindresorhus/is';
 import { DateTime } from 'luxon';
 import { logger } from '../../../logger/index.ts';
 import { coerceArray } from '../../../util/array.ts';
 import { TangledHttp } from '../../../util/http/tangled.ts';
-import { ensureTrailingSlash, getQueryString } from '../../../util/url.ts';
+import { regEx } from '../../../util/regex.ts';
+import {
+  ensureTrailingSlash,
+  getQueryString,
+  parseUrl,
+} from '../../../util/url.ts';
 import type {
   ResubmitPullResult,
   TangledLabel,
-  TangledLabelOperand,
   TangledPull,
   TangledPullStatus,
   TangledRepoRef,
@@ -37,8 +39,6 @@ const TID_CHARSET = '234567abcdefghijklmnopqrstuvwxyz';
 
 /**
  * Generate a new TID (Timestamp-based ID) for use as a record key.
- * TIDs encode a microsecond timestamp in the upper 53 bits
- * and a random clock ID in the lower 10 bits.
  */
 function generateTid(): string {
   const timestamp = BigInt(Date.now()) * 1000n;
@@ -81,7 +81,7 @@ export async function createSession(
 }
 
 /**
- * Get a service auth JWT for authenticating with a knotserver.
+ * Get a service auth JWT for authenticating with a knotserver or index.
  */
 export async function getServiceAuth(
   aud: string,
@@ -104,50 +104,180 @@ export async function getServiceAuth(
   return result.token;
 }
 
+function didFromAtUri(uri: string): string {
+  return uri.split('/')[2];
+}
+
+function knotUrlFromHost(knotHost: string): string {
+  return `https://${knotHost}`;
+}
+
+function didWebFromKnotHost(knotHost: string): string {
+  return `did:web:${knotHost.replace(':', '%3A')}`;
+}
+
 /**
- * Get the default branch info from a knotserver.
+ * Authenticated write to a knot hosting a repo DID's records.
+ *
+ * The audience is the repo DID itself, bound to the XRPC method.
+ */
+async function knotPost<T>(
+  repoDid: string,
+  knotUrl: string,
+  nsid: string,
+  input: unknown,
+): Promise<T> {
+  const token = await getServiceAuth(repoDid, nsid);
+  const url = `${knotUrl.replace(regEx(/\/$/), '')}/xrpc/${nsid}`;
+  const res = await tangledHttp.postJson<T>(url, {
+    body: input,
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  return res.body;
+}
+
+async function knotGetRecord(
+  knotUrl: string,
+  repoDid: string,
+  collection: string,
+  rkey: string,
+): Promise<{ uri: string; cid?: string; value: any }> {
+  const query = getQueryString({ repo: repoDid, collection, rkey });
+  const url = `${knotUrl.replace(regEx(/\/$/), '')}/xrpc/com.atproto.repo.getRecord?${query}`;
+  const res = await tangledHttp.getJsonUnchecked<{
+    uri: string;
+    cid?: string;
+    value: any;
+  }>(url);
+  return res.body;
+}
+
+async function knotListRecords(
+  knotUrl: string,
+  repoDid: string,
+  collection: string,
+  limit = 100,
+): Promise<{ uri: string; cid?: string; value: any }[]> {
+  const records: { uri: string; cid?: string; value: any }[] = [];
+  let cursor: string | undefined;
+  do {
+    const query = getQueryString({
+      repo: repoDid,
+      collection,
+      limit,
+      ...(cursor ? { cursor } : {}),
+    });
+    const url = `${knotUrl.replace(regEx(/\/$/), '')}/xrpc/com.atproto.repo.listRecords?${query}`;
+    const res = await tangledHttp.getJsonUnchecked<{
+      records: { uri: string; cid?: string; value: any }[];
+      cursor?: string;
+    }>(url);
+    records.push(...res.body.records);
+    cursor = res.body.cursor;
+  } while (cursor);
+  return records;
+}
+
+/**
+ * Claim a knot-written record on the bot's own PDS, the way the web app
+ * does, so the record is visible as the bot's own action.
+ * Failures are non-fatal.
+ */
+async function attest(uri: string, cid: string): Promise<void> {
+  if (!pdsClient) {
+    throw new Error('Not authenticated');
+  }
+  try {
+    await ok(
+      pdsClient.post('com.atproto.repo.createRecord', {
+        input: {
+          repo: botDid as any,
+          collection: 'org.tangled.graph.attestation' as any,
+          rkey: generateTid() as any,
+          record: {
+            $type: 'org.tangled.graph.attestation',
+            subject: { uri, cid },
+            createdAt: DateTime.utc().toISO(),
+          },
+        },
+      }),
+    );
+  } catch (err) {
+    logger.debug({ err, uri }, 'Failed to attest knot-written record');
+  }
+}
+
+/**
+ * Get the branch head commit from the index.
+ */
+export async function getBranchHead(
+  repoDid: string,
+  branch: string,
+  appview: string,
+): Promise<string> {
+  const query = getQueryString({ repo: repoDid, ref: `refs/heads/${branch}` });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.temp.git.getRef?${query}`;
+  const res = await tangledHttp.getJsonUnchecked<{ oid: string }>(url);
+  if (!res.body?.oid) {
+    throw new Error(`Could not determine head for branch "${branch}"`);
+  }
+  return res.body.oid;
+}
+
+/**
+ * Get the merge base of two commits from the index.
+ */
+export async function getMergeBase(
+  repoDid: string,
+  base: string,
+  head: string,
+  appview: string,
+): Promise<string> {
+  const query = getQueryString({ repos: [repoDid], base, head });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.temp.git.getMergeBase?${query}`;
+  const res = await tangledHttp.getJsonUnchecked<{ commit: string }>(url);
+  if (!res.body?.commit) {
+    throw new Error('Could not determine merge base');
+  }
+  return res.body.commit;
+}
+
+/**
+ * Get the default branch and its head from the index.
  */
 export async function getDefaultBranch(
-  knotHost: string,
-  repo: string,
-): Promise<{ name: string; hash: string }> {
-  const query = getQueryString({ repo });
-  const url = `https://${knotHost}/xrpc/sh.tangled.repo.getDefaultBranch?${query}`;
-  const res = await tangledHttp.getJsonUnchecked<{
-    name: string;
-    hash: string;
-  }>(url);
-  return res.body;
-}
-
-/**
- * Get repository description from a knotserver.
- */
-export async function describeRepo(
-  knotHost: string,
   repoDid: string,
-): Promise<{ ownerDid: string; repoDid: string; rkey: string }> {
-  const query = getQueryString({ repoDid });
-  const url = `https://${knotHost}/xrpc/sh.tangled.repo.describeRepo?${query}`;
+  appview: string,
+): Promise<{ name: string; hash: string }> {
+  const query = getQueryString({ repo: repoDid, limit: 100 });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.temp.git.listBranches?${query}`;
   const res = await tangledHttp.getJsonUnchecked<{
-    ownerDid: string;
-    repoDid: string;
-    rkey: string;
+    defaultBranch?: string;
+    branches?: { name: string; oid: string }[];
   }>(url);
-  return res.body;
+  const name = res.body?.defaultBranch;
+  if (!name) {
+    throw new Error(`Could not determine default branch for ${repoDid}`);
+  }
+  const branch = res.body.branches?.find((b) => b.name === name);
+  // Fall back to a direct ref lookup when the list omits the OID.
+  const hash = branch?.oid ?? (await getBranchHead(repoDid, name, appview));
+  return { name, hash };
 }
 
 /**
- * Read a file from a repository via the knotserver blob endpoint.
+ * Read a file from a repository via the index blob endpoint.
  */
 export async function getBlob(
-  knotHost: string,
   repoDid: string,
   ref: string,
   path: string,
+  appview: string,
 ): Promise<string | null> {
-  const query = getQueryString({ repo: repoDid, ref, path, raw: 'true' });
-  const url = `https://${knotHost}/xrpc/sh.tangled.repo.blob?${query}`;
+  const query = getQueryString({ repo: repoDid, ref, path });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.temp.git.getBlob?${query}`;
 
   try {
     const res = await tangledHttp.getText(url);
@@ -158,150 +288,171 @@ export async function getBlob(
 }
 
 /**
- * Get a format-patch comparing two revisions from the knotserver.
- *
- * The knotserver returns JSON (`sh.tangled.repo.compare`), with the raw
- * format-patch series in the `patch` field. This is the value Tangled's
- * appview gzips and stores as the pull's `patchBlob`.
+ * Get a format-patch between two commits from the index.
  */
-export async function compare(
-  knotHost: string,
-  repo: string,
-  rev1: string,
-  rev2: string,
+export async function getFormatPatch(
+  repoDid: string,
+  from: string,
+  to: string,
+  appview: string,
 ): Promise<string> {
-  const query = getQueryString({ repo, rev1, rev2 });
-  const url = `https://${knotHost}/xrpc/sh.tangled.repo.compare?${query}`;
-  const res = await tangledHttp.getJsonUnchecked<{ patch: string }>(url);
-  return res.body.patch;
+  const query = getQueryString({ repo: repoDid, from, to });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.temp.git.formatPatch?${query}`;
+  const res = await tangledHttp.getText(url);
+  return res.body;
 }
 
-/**
- * Upload a blob to the PDS.
- */
-export async function uploadBlob(
-  data: Buffer,
-): Promise<{ ref: { $link: string }; mimeType: string; size: number }> {
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
+interface TicketRecordInput {
+  title: string;
+  body?: string;
+  targetBranch: string;
+}
+
+function toTicketRecord(input: TicketRecordInput): Record<string, unknown> {
+  const now = DateTime.utc().toISO();
+  const record: Record<string, unknown> = {
+    $type: 'org.tangled.track.ticket',
+    title: {
+      $type: 'org.tangled.markup.markdown#inline',
+      text: input.title,
+    },
+    state: 'open',
+    targetBranch: input.targetBranch,
+    createdAt: now,
+  };
+  if (input.body?.trim()) {
+    record.body = {
+      $type: 'org.tangled.markup.markdown',
+      text: input.body,
+    };
   }
-
-  const result = await ok(
-    pdsClient.post('com.atproto.repo.uploadBlob', {
-      input: new Blob([data as BlobPart], { type: 'application/gzip' }),
-    }),
-  );
-  return result.blob;
+  return record;
 }
 
 /**
- * Create a pull request record in the bot's PDS.
+ * Create a pull request the way the web app does: a ticket on the repo,
+ * then a patch from the merge base to the source head.
  */
 export async function createPullRecord(
-  targetRepoDid: string,
+  repoDid: string,
+  knotUrl: string,
   targetBranch: string,
   sourceBranch: string,
+  sourceHead: string,
+  base: string,
   title: string,
   body: string,
-  patchBlob: { ref: { $link: string }; mimeType: string; size: number },
-  sourceRepoDid?: string,
 ): Promise<{ uri: string; cid: string; rkey: string }> {
   if (!pdsClient) {
     throw new Error('Not authenticated');
   }
 
-  const rkey = generateTid();
-  const now = DateTime.utc().toISO();
-
-  const record: ShTangledRepoPull.Main = {
-    $type: 'sh.tangled.repo.pull',
-    title,
-    body: body || undefined,
-    target: {
-      repo: targetRepoDid as any,
-      branch: targetBranch,
+  const ticket = toTicketRecord({ title, body, targetBranch });
+  const created = await knotPost<{ uri: string; cid: string }>(
+    repoDid,
+    knotUrl,
+    'com.atproto.repo.createRecord',
+    {
+      repo: repoDid,
+      collection: 'org.tangled.track.ticket',
+      record: ticket,
     },
-    source: {
-      branch: sourceBranch,
-      repo: sourceRepoDid as any,
-    },
-    rounds: [
-      {
-        patchBlob: patchBlob as any,
-        createdAt: now,
-      },
-    ],
-    createdAt: now,
-  };
-
-  const result = await ok(
-    pdsClient.post('com.atproto.repo.putRecord', {
-      input: {
-        repo: botDid as any,
-        collection: 'sh.tangled.repo.pull' as any,
-        rkey: rkey as any,
-        record,
-      },
-    }),
   );
+  const rkey = rkeyFromUri(created.uri);
 
-  return { uri: result.uri, cid: result.cid, rkey };
+  try {
+    const patch = await knotPost<{ uri: string; cid: string }>(
+      repoDid,
+      knotUrl,
+      'org.tangled.review.submitPatch',
+      {
+        repo: repoDid,
+        patch: {
+          ticket: rkey,
+          base: { oid: base },
+          head: { oid: sourceHead },
+          sourceRepo: repoDid,
+          sourceBranch,
+        },
+      },
+    );
+    // Claim both records on the bot's PDS. Best-effort.
+    await attest(created.uri, created.cid);
+    await attest(patch.uri, patch.cid);
+  } catch (err) {
+    // Roll back the ticket when the patch is refused, mirroring tng-cli.
+    try {
+      const token = await getServiceAuth(
+        repoDid,
+        'com.atproto.repo.deleteRecord',
+      );
+      await tangledHttp.postJson(
+        `${knotUrl.replace(regEx(/\/$/), '')}/xrpc/com.atproto.repo.deleteRecord`,
+        {
+          body: {
+            repo: repoDid,
+            collection: 'org.tangled.track.ticket',
+            rkey,
+          },
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+    } catch (deleteErr) {
+      logger.debug(
+        { err: deleteErr, rkey },
+        'Failed to delete ticket after patch submission failed',
+      );
+    }
+    throw err;
+  }
+
+  return { uri: created.uri, cid: created.cid, rkey };
 }
 
 /**
- * Read one of the bot's own pull request records, returning the record and its
+ * Read a ticket record from the knot, returning the record and its
  * current CID (used as a compare-and-swap precondition on writes).
  */
-async function getPullRecord(
+async function getTicketRecord(
+  repoDid: string,
+  knotUrl: string,
   rkey: string,
-): Promise<{ record: ShTangledRepoPull.Main; cid: string | undefined }> {
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
-  }
-
-  const existing = await ok(
-    pdsClient.get('com.atproto.repo.getRecord', {
-      params: {
-        repo: botDid as any,
-        collection: 'sh.tangled.repo.pull' as any,
-        rkey: rkey as any,
-      },
-    }),
+): Promise<{ record: Record<string, any>; cid?: string; uri: string }> {
+  const res = await knotGetRecord(
+    knotUrl,
+    repoDid,
+    'org.tangled.track.ticket',
+    rkey,
   );
-
-  return {
-    record: existing.value as ShTangledRepoPull.Main,
-    cid: existing.cid,
-  };
+  return { record: res.value, cid: res.cid, uri: res.uri };
 }
 
 /**
- * Write a pull request record back to the bot's PDS.
- *
- * When `swapRecord` is given, the write only succeeds if the stored record
- * still has that CID, so a concurrent writer cannot silently clobber changes.
+ * Write a ticket record back to the knot.
  */
-async function putPullRecord(
+async function putTicketRecord(
+  repoDid: string,
+  knotUrl: string,
   rkey: string,
-  record: ShTangledRepoPull.Main,
+  record: Record<string, unknown>,
   swapRecord?: string,
-): Promise<void> {
-  /* v8 ignore next -- unreachable: callers read the record first, which authenticates */
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
-  }
-
-  await ok(
-    pdsClient.post('com.atproto.repo.putRecord', {
-      input: {
-        repo: botDid as any,
-        collection: 'sh.tangled.repo.pull' as any,
-        rkey: rkey as any,
-        record,
-        ...(swapRecord ? { swapRecord: swapRecord as any } : {}),
-      },
-    }),
+): Promise<{ uri: string; cid: string }> {
+  const clean = Object.fromEntries(
+    Object.entries(record).filter(([key]) => !key.startsWith('x-tngl-')),
   );
+  const res = await knotPost<{ uri: string; cid: string }>(
+    repoDid,
+    knotUrl,
+    'com.atproto.repo.putRecord',
+    {
+      repo: repoDid,
+      collection: 'org.tangled.track.ticket',
+      rkey,
+      record: clean,
+      ...(swapRecord ? { swapRecord } : {}),
+    },
+  );
+  return res;
 }
 
 /**
@@ -313,26 +464,40 @@ function isInvalidSwap(err: unknown): boolean {
 }
 
 /**
- * Update a pull request record (title/body).
+ * Update a pull request ticket (title/body).
  */
 export async function updatePullRecord(
+  repoDid: string,
+  knotUrl: string,
   rkey: string,
   updates: { title?: string; body?: string },
 ): Promise<void> {
-  // Retry once when another writer changed the record between our read and
-  // write, so the update is not lost.
+  if (!pdsClient) {
+    throw new Error('Not authenticated');
+  }
   for (let attempt = 0; ; attempt++) {
-    const { record, cid } = await getPullRecord(rkey);
+    const { record, cid } = await getTicketRecord(repoDid, knotUrl, rkey);
 
     if (updates.title !== undefined) {
-      record.title = updates.title;
+      record.title = {
+        $type: 'org.tangled.markup.markdown#inline',
+        text: updates.title,
+      };
     }
     if (updates.body !== undefined) {
-      record.body = updates.body || undefined;
+      if (updates.body?.trim()) {
+        record.body = {
+          $type: 'org.tangled.markup.markdown',
+          text: updates.body,
+        };
+      } else {
+        delete record.body;
+      }
     }
 
     try {
-      await putPullRecord(rkey, record, cid);
+      const ref = await putTicketRecord(repoDid, knotUrl, rkey, record, cid);
+      await attest(ref.uri, ref.cid);
       return;
     } catch (err) {
       if (attempt > 0 || !isInvalidSwap(err)) {
@@ -347,271 +512,248 @@ export async function updatePullRecord(
 }
 
 /**
- * Read the format-patch stored in a pull request round.
- *
- * Blob data lives on the bot's PDS and is fetched through the public
- * `com.atproto.sync.getBlob` endpoint.
+ * List patch rounds for a ticket, oldest first.
  */
-async function getStoredPatch(
-  round: ShTangledRepoPull.Round | undefined,
-): Promise<string | null> {
-  const cid = (round?.patchBlob as { ref?: { $link?: string } } | undefined)
-    ?.ref?.$link;
-  const pdsUrl = session?.dispatchUrl;
-  if (!cid || !pdsUrl) {
-    return null;
+async function listRounds(
+  repoDid: string,
+  knotUrl: string,
+  ticket: string,
+): Promise<OrgTangledReviewPatch.Main[]> {
+  const records = await knotListRecords(
+    knotUrl,
+    repoDid,
+    'org.tangled.review.patch',
+  );
+  const rounds: OrgTangledReviewPatch.Main[] = [];
+  for (const rec of records) {
+    const value = rec.value as OrgTangledReviewPatch.Main & {
+      ticket?: string;
+      createdAt?: string;
+    };
+    if (value?.ticket === ticket) {
+      rounds.push(value);
+    }
   }
-
-  const query = getQueryString({ did: botDid, cid });
-  const url = `${ensureTrailingSlash(pdsUrl)}xrpc/com.atproto.sync.getBlob?${query}`;
-  try {
-    const res = await tangledHttp.getBuffer(url);
-    return gunzipSync(Buffer.from(res.body)).toString('utf-8');
-  } catch (err) {
-    logger.debug({ err, cid }, 'Failed to read stored pull request patch');
-    return null;
-  }
+  rounds.sort((a, b) =>
+    String((a as { createdAt?: string }).createdAt ?? '').localeCompare(
+      String((b as { createdAt?: string }).createdAt ?? ''),
+    ),
+  );
+  return rounds;
 }
 
 /**
  * Sync a pull request's latest round with the current source branch.
  *
- * Tangled pull requests are snapshots: pushing to the source branch does not
- * update the diff reviewers see. Resubmitting appends a new round containing a
- * fresh format-patch of the current branch. This is a no-op when the latest
- * round already represents the branch, so it is safe to call on every run.
+ * Compares the latest round's head with the source branch head from the
+ * index. Submits a new patch when they differ. Safe to call on every run.
  */
 export async function resubmitPull(
-  knotHost: string,
   repoDid: string,
+  knotUrl: string,
+  appview: string,
   targetBranch: string,
   sourceBranch: string,
   rkey: string,
   dryRun = false,
 ): Promise<ResubmitPullResult> {
-  const patch = await compare(knotHost, repoDid, targetBranch, sourceBranch);
+  if (!dryRun && !pdsClient) {
+    throw new Error('Not authenticated');
+  }
+  // Cheap checks first: read the rounds and the source branch head, and
+  // return early when they already match. The merge base is only computed
+  // when a new round will actually be submitted, keeping the common
+  // no-change case to one knot read plus one index read.
+  const rounds = await listRounds(repoDid, knotUrl, rkey);
+  const latest = rounds.at(-1) as { head?: { oid?: string } } | undefined;
+  const sourceHead = await getBranchHead(repoDid, sourceBranch, appview);
 
-  // Upload the patch once so retries reuse the same blob.
-  let blobRef:
-    { ref: { $link: string }; mimeType: string; size: number } | undefined;
-
-  // Retry once when another writer changed the record between our read and
-  // write, so the new round is not lost.
-  for (let attempt = 0; ; attempt++) {
-    const { record, cid } = await getPullRecord(rkey);
-    const rounds = coerceArray(record.rounds);
-
-    // Skip when the latest round already represents the current branch.
-    const storedPatch = await getStoredPatch(rounds.at(-1));
-    if (storedPatch === patch) {
-      return {
-        changed: false,
-        resubmitted: false,
-        round: rounds.length ? rounds.length - 1 : null,
-      };
-    }
-
-    if (dryRun) {
-      return {
-        changed: true,
-        resubmitted: false,
-        round: rounds.length ? rounds.length - 1 : null,
-      };
-    }
-
-    blobRef ??= await uploadBlob(gzipSync(Buffer.from(patch, 'utf-8')));
-    const updated: ShTangledRepoPull.Main = {
-      ...record,
-      rounds: [
-        ...rounds,
-        { patchBlob: blobRef as any, createdAt: DateTime.utc().toISO() },
-      ],
+  if (latest?.head?.oid === sourceHead) {
+    return {
+      changed: false,
+      resubmitted: false,
+      round: rounds.length ? rounds.length - 1 : null,
     };
+  }
 
+  if (dryRun) {
+    return {
+      changed: true,
+      resubmitted: false,
+      round: rounds.length ? rounds.length - 1 : null,
+    };
+  }
+
+  const targetHead = await getBranchHead(repoDid, targetBranch, appview);
+  const base = await getMergeBase(repoDid, targetHead, sourceHead, appview);
+
+  // submitPatch creates a new immutable record without a compare-and-swap
+  // precondition, so there is nothing to retry on: concurrent submissions
+  // simply append another round.
+  const patch = await knotPost<{ uri: string; cid: string }>(
+    repoDid,
+    knotUrl,
+    'org.tangled.review.submitPatch',
+    {
+      repo: repoDid,
+      patch: {
+        ticket: rkey,
+        base: { oid: base },
+        head: { oid: sourceHead },
+        sourceRepo: repoDid,
+        sourceBranch,
+      },
+    },
+  );
+  await attest(patch.uri, patch.cid);
+  return { changed: true, resubmitted: true, round: rounds.length };
+}
+
+function mapTicketState(state: unknown): TangledPullStatus {
+  if (state === 'completed' || state === 'merged') {
+    return 'merged';
+  }
+  if (state === 'closed') {
+    return 'closed';
+  }
+  return 'open';
+}
+
+/**
+ * Set the state of a pull request ticket (open/closed/completed).
+ */
+export async function setPullState(
+  repoDid: string,
+  knotUrl: string,
+  rkey: string,
+  state: 'open' | 'closed' | 'completed',
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    const { record, cid } = await getTicketRecord(repoDid, knotUrl, rkey);
+    record.state = state;
     try {
-      await putPullRecord(rkey, updated, cid);
-      return { changed: true, resubmitted: true, round: rounds.length };
+      const ref = await putTicketRecord(repoDid, knotUrl, rkey, record, cid);
+      await attest(ref.uri, ref.cid);
+      return;
     } catch (err) {
       if (attempt > 0 || !isInvalidSwap(err)) {
         throw err;
       }
-      logger.debug(
-        { err, rkey },
-        'Pull request record changed concurrently, retrying resubmit',
-      );
+      logger.debug({ err, rkey }, 'Ticket changed concurrently, retrying');
     }
   }
 }
 
 /**
- * Set the status of a pull request (open/closed/merged).
+ * List all pull requests (tickets with `targetBranch`) for a repository.
+ *
+ * Reads the ticket list from the index and patch rounds from the knot,
+ * so every author's PRs are included.
  */
-export async function setPullStatus(
-  pullUri: string,
-  status:
-    | 'sh.tangled.repo.pull.status.open'
-    | 'sh.tangled.repo.pull.status.closed'
-    | 'sh.tangled.repo.pull.status.merged',
-): Promise<void> {
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
-  }
-
-  await ok(
-    pdsClient.post('com.atproto.repo.createRecord', {
-      input: {
-        repo: botDid as any,
-        collection: 'sh.tangled.repo.pull.status' as any,
-        record: {
-          $type: 'sh.tangled.repo.pull.status',
-          pull: pullUri,
-          status,
-        },
-      },
-    }),
-  );
-}
-
-/**
- * List all pull request records created by the bot.
- */
-export async function listPullRecords(): Promise<TangledPull[]> {
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
-  }
-
-  const pulls: TangledPull[] = [];
+export async function listPullRecords(
+  repoDid: string,
+  knotUrl: string,
+  appview: string,
+): Promise<TangledPull[]> {
+  const items: {
+    uri: string;
+    cid?: string;
+    value: unknown;
+    state?: string;
+  }[] = [];
   let cursor: string | undefined;
 
   do {
-    const result = await ok(
-      pdsClient.get('com.atproto.repo.listRecords', {
-        params: {
-          repo: botDid as any,
-          collection: 'sh.tangled.repo.pull' as any,
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        },
-      }),
-    );
-
-    for (const rec of result.records) {
-      const rkey = rkeyFromUri(rec.uri);
-      pulls.push({
-        uri: rec.uri,
-        cid: rec.cid,
-        rkey,
-        record: rec.value as ShTangledRepoPull.Main,
-        status: 'open',
-      });
-    }
-
-    cursor = result.cursor;
+    const query = getQueryString({
+      subject: repoDid,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.repo.listPulls?${query}`;
+    const res = await tangledHttp.getJsonUnchecked<{
+      items: {
+        uri: string;
+        cid?: string;
+        value: unknown;
+        state?: string;
+      }[];
+      cursor?: string;
+    }>(url);
+    items.push(...res.body.items);
+    cursor = res.body.cursor;
   } while (cursor);
 
-  // Fetch status records to resolve current status
-  const statusMap = new Map<string, TangledPullStatus>();
-  let statusCursor: string | undefined;
-
-  do {
-    const statusResult: {
-      records: { uri: string; cid: string; value: unknown }[];
-      cursor?: string;
-    } = await ok(
-      pdsClient.get('com.atproto.repo.listRecords', {
-        params: {
-          repo: botDid as any,
-          collection: 'sh.tangled.repo.pull.status' as any,
-          limit: 100,
-          ...(statusCursor ? { cursor: statusCursor } : {}),
-        },
-      }),
+  // Fetch all patches once, grouped by ticket.
+  const patchRecords = await knotListRecords(
+    knotUrl,
+    repoDid,
+    'org.tangled.review.patch',
+  );
+  const byTicket = new Map<string, OrgTangledReviewPatch.Main[]>();
+  for (const rec of patchRecords) {
+    const value = rec.value as OrgTangledReviewPatch.Main & {
+      ticket?: string;
+    };
+    const ticket = value?.ticket;
+    if (!ticket) {
+      continue;
+    }
+    const list = coerceArray(byTicket.get(ticket));
+    list.push(value);
+    byTicket.set(ticket, list);
+  }
+  for (const rounds of byTicket.values()) {
+    rounds.sort((a, b) =>
+      String((a as { createdAt?: string }).createdAt ?? '').localeCompare(
+        String((b as { createdAt?: string }).createdAt ?? ''),
+      ),
     );
+  }
 
-    for (const rec of statusResult.records) {
-      const statusRecord = rec.value as {
-        pull: string;
-        status?: string;
-      };
-      const pullUri = statusRecord.pull;
-      const st = statusRecord.status;
-
-      if (st === 'sh.tangled.repo.pull.status.closed') {
-        statusMap.set(pullUri, 'closed');
-      } else if (st === 'sh.tangled.repo.pull.status.merged') {
-        statusMap.set(pullUri, 'merged');
-      } else if (
-        st === 'sh.tangled.repo.pull.status.open' &&
-        !statusMap.has(pullUri)
-      ) {
-        statusMap.set(pullUri, 'open');
-      }
+  const pulls: TangledPull[] = [];
+  for (const item of items) {
+    const rkey = rkeyFromUri(item.uri);
+    const record = item.value as OrgTangledTrackTicket.Main & {
+      targetBranch?: string;
+      state?: string;
+    };
+    // Issues have no targetBranch; only pull requests are relevant.
+    if (!record?.targetBranch) {
+      continue;
     }
-
-    statusCursor = statusResult.cursor;
-  } while (statusCursor);
-
-  for (const pull of pulls) {
-    const resolvedStatus = statusMap.get(pull.uri);
-    if (resolvedStatus) {
-      pull.status = resolvedStatus;
-    }
+    pulls.push({
+      uri: item.uri,
+      cid: item.cid ?? '',
+      rkey,
+      record: record,
+      rounds: coerceArray(byTicket.get(rkey)),
+      status: mapTicketState(item.state ?? record.state),
+    });
   }
 
   return pulls;
 }
 
 /**
- * List label operations for a pull request via the appview.
- *
- * Label ops live in the PDS of whoever applied them, so they cannot be read
- * from the bot's own records. The appview (Bobbin) aggregates them.
- */
-export async function listLabelOps(
-  appview: string,
-  subject: string,
-): Promise<ShTangledLabelOp.Main[]> {
-  const ops: ShTangledLabelOp.Main[] = [];
-  let cursor: string | undefined;
-
-  do {
-    const query = getQueryString({
-      subject,
-      limit: 100,
-      ...(cursor ? { cursor } : {}),
-    });
-    const url = `${ensureTrailingSlash(appview)}xrpc/sh.tangled.label.listOps?${query}`;
-    const res = await tangledHttp.getJsonUnchecked<{
-      items: { value: ShTangledLabelOp.Main }[];
-      cursor?: string;
-    }>(url);
-    ops.push(...res.body.items.map((item) => item.value));
-    cursor = res.body.cursor;
-  } while (cursor);
-
-  return ops;
-}
-
-/**
- * List a label author's definitions, returning a map of definition AT-URI
- * to display name.
+ * List label definitions in a repository, returning a map of definition
+ * AT-URI to display name.
  */
 export async function listLabelDefinitions(
   appview: string,
-  authorDid: string,
+  repoDid: string,
 ): Promise<Map<string, string>> {
   const definitions = new Map<string, string>();
   let cursor: string | undefined;
 
   do {
     const query = getQueryString({
-      subject: authorDid,
+      subject: repoDid,
       limit: 100,
       ...(cursor ? { cursor } : {}),
     });
-    const url = `${ensureTrailingSlash(appview)}xrpc/sh.tangled.label.listDefinitions?${query}`;
+    const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.label.listDefinitions?${query}`;
     const res = await tangledHttp.getJsonUnchecked<{
-      items: { uri: string; value: ShTangledLabelDefinition.Main }[];
+      items: { uri: string; value: { name?: string } }[];
       cursor?: string;
     }>(url);
     for (const item of res.body.items) {
@@ -626,117 +768,154 @@ export async function listLabelDefinitions(
 }
 
 /**
- * Compute the labels currently applied to a pull request by replaying its
- * label operations in chronological order and resolving each definition.
+ * Compute the labels currently applied to a pull request.
+ *
+ * Labels are stored on the ticket itself (`tangledLabels`), with
+ * definitions owned by the repository.
  */
 export async function getLabels(
   appview: string,
-  subject: string,
+  repoDid: string,
+  ticketUri: string,
 ): Promise<TangledLabel[]> {
-  const ops = await listLabelOps(appview, subject);
-  if (ops.length === 0) {
+  const query = getQueryString({ uri: ticketUri });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.track.getTicketView?${query}`;
+  let view: { tangledLabels?: { key: string }[] };
+  try {
+    const res = await tangledHttp.getJsonUnchecked<{
+      tangledLabels?: { key: string }[];
+    }>(url);
+    view = res.body;
+  } catch (err) {
+    logger.debug({ err, ticketUri }, 'Failed to read ticket view for labels');
     return [];
   }
 
-  // Replay add/delete operations in the order they were performed. Parse the
-  // timestamps rather than comparing the raw strings, since they carry
-  // different UTC offsets.
-  const applied = new Map<string, string>();
-  for (const op of [...ops].sort(
-    (a, b) =>
-      DateTime.fromISO(a.performedAt).toMillis() -
-      DateTime.fromISO(b.performedAt).toMillis(),
-  )) {
-    for (const operand of coerceArray(op.delete)) {
-      applied.delete(operand.key);
-    }
-    for (const operand of coerceArray(op.add)) {
-      applied.set(operand.key, operand.value);
-    }
-  }
-  if (applied.size === 0) {
+  const tokens = coerceArray(view.tangledLabels);
+  if (tokens.length === 0) {
     return [];
   }
 
-  // Definition names live in their author's records, queried per author.
-  const names = new Map<string, string>();
-  const authors = new Set(
-    [...applied.keys()].map((uri) => uri.split('/')[2]).filter(isTruthy),
-  );
-  await Promise.all(
-    [...authors].map(async (author) => {
-      const definitions = await listLabelDefinitions(appview, author);
-      for (const [uri, name] of definitions) {
-        names.set(uri, name);
+  const definitions = await listLabelDefinitions(appview, repoDid);
+  // Index definitions by rkey for lookup from label tokens.
+  const byRkey = new Map<string, { uri: string; name: string }>();
+  for (const [uri, name] of definitions) {
+    byRkey.set(rkeyFromUri(uri), { uri, name });
+  }
+
+  return tokens
+    .map((token) => {
+      const def = byRkey.get(token.key);
+      if (!def) {
+        return null;
       }
-    }),
-  );
-
-  return [...applied.entries()].map(([key, value]) => ({
-    key,
-    value,
-    name: names.get(key) ?? rkeyFromUri(key),
-  }));
+      return { key: def.uri, value: '', name: def.name };
+    })
+    .filter((label): label is TangledLabel => label !== null);
 }
 
 /**
- * Write a label operation (add/delete) to the bot's own PDS.
+ * Remove a label from a ticket by display name.
  */
-export async function createLabelOp(
-  subject: string,
-  add: TangledLabelOperand[],
-  remove: TangledLabelOperand[],
-): Promise<void> {
-  if (!pdsClient) {
-    throw new Error('Not authenticated');
+export async function removeLabel(
+  repoDid: string,
+  knotUrl: string,
+  appview: string,
+  rkey: string,
+  labelName: string,
+): Promise<boolean> {
+  const definitions = await listLabelDefinitions(appview, repoDid);
+  const matchingRkeys = new Set<string>();
+  for (const [uri, name] of definitions) {
+    if (name === labelName) {
+      matchingRkeys.add(rkeyFromUri(uri));
+    }
+  }
+  if (matchingRkeys.size === 0) {
+    return false;
   }
 
-  await ok(
-    pdsClient.post('com.atproto.repo.createRecord', {
-      input: {
-        repo: botDid as any,
-        collection: 'sh.tangled.label.op' as any,
-        record: {
-          $type: 'sh.tangled.label.op',
-          subject,
-          add,
-          delete: remove,
-          performedAt: DateTime.utc().toISO(),
-        },
-      },
-    }),
-  );
+  for (let attempt = 0; ; attempt++) {
+    const { record, cid } = await getTicketRecord(repoDid, knotUrl, rkey);
+    const current = Array.isArray(record.tangledLabels)
+      ? (record.tangledLabels as { key: string }[])
+      : [];
+    const filtered = current.filter((token) => !matchingRkeys.has(token.key));
+    if (filtered.length === current.length) {
+      return false;
+    }
+    record.tangledLabels = filtered;
+    try {
+      const ref = await putTicketRecord(repoDid, knotUrl, rkey, record, cid);
+      await attest(ref.uri, ref.cid);
+      return true;
+    } catch (err) {
+      if (attempt > 0 || !isInvalidSwap(err)) {
+        throw err;
+      }
+      logger.debug({ err, rkey }, 'Ticket changed concurrently, retrying');
+    }
+  }
 }
 
 /**
- * Merge a pull request via the knotserver.
+ * Merge a pull request via the index, the way the web app's
+ * "Rebase & merge" does, then mark the ticket completed.
  */
 export async function mergePull(
-  knotHost: string,
   repoDid: string,
-  ownerDid: string,
-  repoRkey: string,
+  knotUrl: string,
+  knotHost: string,
+  appview: string,
   targetBranch: string,
-  patch: string,
+  rkey: string,
 ): Promise<void> {
+  const rounds = await listRounds(repoDid, knotUrl, rkey);
+  const latest = rounds.at(-1) as
+    | {
+        head?: { oid?: string };
+        source?: { repo?: string };
+      }
+    | undefined;
+  const head = latest?.head?.oid;
+  if (!head) {
+    throw new Error(`Pull request #${rkey} has no patch to merge`);
+  }
+  if (latest?.source?.repo && latest.source.repo !== repoDid) {
+    throw new Error(
+      `Pull request #${rkey} comes from another repo; merges are same-repo only`,
+    );
+  }
+
+  const targetHead = await getBranchHead(repoDid, targetBranch, appview);
+
   const serviceAuthToken = await getServiceAuth(
-    `did:web:${knotHost}`,
-    'sh.tangled.repo.merge',
+    didWebFromKnotHost(knotHost),
+    'org.tangled.git.receivePack',
   );
 
-  const url = `https://${knotHost}/xrpc/sh.tangled.repo.merge`;
+  const url = `${ensureTrailingSlash(appview)}xrpc/sh.tangled.git.mergeCommit`;
   await tangledHttp.postJson(url, {
     body: {
-      repo: repoDid,
-      did: ownerDid,
-      name: repoRkey,
-      branch: targetBranch,
-      patch,
+      target: {
+        $type: 'sh.tangled.git.mergeCommit#target',
+        repo: repoDid,
+        branch: targetBranch,
+        commit: targetHead,
+      },
+      source: {
+        $type: 'sh.tangled.git.mergeCommit#source',
+        repo: repoDid,
+        commit: head,
+      },
+      style: 'rebase',
     },
     headers: {
       Authorization: `Bearer ${serviceAuthToken}`,
     },
   });
+
+  await setPullState(repoDid, knotUrl, rkey, 'completed');
 }
 
 /**
@@ -773,10 +952,6 @@ interface DidDocument {
 
 /**
  * Resolve the PDS endpoint for a DID using its DID document.
- *
- * `did:plc` DIDs are resolved via the PLC directory; `did:web` DIDs via
- * their well-known DID document. Falls back to the bsky AppView when the
- * document cannot be fetched.
  */
 export async function resolvePdsEndpoint(did: string): Promise<string> {
   let url: string;
@@ -813,9 +988,6 @@ export async function resolvePdsEndpoint(did: string): Promise<string> {
 
 /**
  * Resolve the PDS endpoint that hosts an account, given its handle.
- *
- * The handle is resolved to a DID, then the DID document is used to find the
- * PDS service URL, so no PDS configuration is required.
  */
 export async function resolvePdsForHandle(
   handle: string,
@@ -826,110 +998,73 @@ export async function resolvePdsForHandle(
 }
 
 /**
- * Build a repository reference from a raw `sh.tangled.repo` record value.
- */
-function toRepoRef(
-  value: unknown,
-  fallbackName: string,
-  rkey: string,
-): TangledRepoRef {
-  const record = value as { knot?: string; name?: string; repoDid?: string };
-  if (!record?.knot) {
-    throw new Error(
-      `Could not determine knot host for repository "${fallbackName}"`,
-    );
-  }
-  return {
-    knot: record.knot,
-    repoDid: record.repoDid ?? '',
-    name: record.name ?? fallbackName,
-    rkey,
-  };
-}
-
-/**
- * Returns whether an error is an AT Protocol `RecordNotFound` response.
- */
-function isRecordNotFound(err: unknown): boolean {
-  return (
-    isObject(err) && (err as { error?: string }).error === 'RecordNotFound'
-  );
-}
-
-/**
- * Resolve the `sh.tangled.repo` record for a repository.
+ * Resolve a repository via the index.
  *
- * Repository records use an arbitrary rkey: older repositories use the
- * repository name, while newer ones use a TID with the display name stored
- * in the record's `name` field. We first attempt a direct lookup by name,
- * then fall back to listing records and matching on `name`.
+ * Uses `org.tangled.repo.getRepoByName` on the appview, which returns the
+ * repo DID (as the record URI authority), the knot host, and the manifest.
  */
 export async function resolveRepoRef(
   ownerDid: string,
   repoName: string,
+  appview: string,
 ): Promise<TangledRepoRef> {
-  const pds = await resolvePdsEndpoint(ownerDid);
-  const client = new Client({
-    handler: simpleFetchHandler({ service: pds }),
-  });
-
-  // Fast path: legacy repositories use the name as the rkey
-  let direct: { value: unknown } | null = null;
+  const query = getQueryString({ owner: ownerDid, name: repoName });
+  const url = `${ensureTrailingSlash(appview)}xrpc/org.tangled.repo.getRepoByName?${query}`;
+  let body: {
+    uri: string;
+    knot?: string;
+    value?: { declaration?: { name?: string } };
+    defaultBranch?: string;
+  };
   try {
-    direct = await ok(
-      client.get('com.atproto.repo.getRecord', {
-        params: {
-          repo: ownerDid as any,
-          collection: 'sh.tangled.repo' as any,
-          rkey: repoName as any,
-        },
-      }),
-    );
+    const res = await tangledHttp.getJsonUnchecked<{
+      uri: string;
+      knot?: string;
+      value?: { declaration?: { name?: string } };
+      defaultBranch?: string;
+    }>(url);
+    body = res.body;
   } catch (err) {
-    if (!isRecordNotFound(err)) {
-      throw err;
-    }
-    logger.debug(
-      { err, ownerDid, repoName },
-      'Direct sh.tangled.repo lookup missed, falling back to listRecords',
+    logger.debug({ err, ownerDid, repoName }, 'Failed to resolve repo');
+    throw new Error(
+      `Tangled repository "${repoName}" was not found for ${ownerDid}`,
     );
   }
 
-  if (direct) {
-    const directName = (direct.value as { name?: string } | null)?.name;
-    // The rkey may point at a renamed record whose name no longer matches
-    if (!directName || directName === repoName) {
-      return toRepoRef(direct.value, repoName, repoName);
-    }
+  if (!body?.uri) {
+    throw new Error(
+      `Tangled repository "${repoName}" was not found for ${ownerDid}`,
+    );
   }
 
-  // Fallback: repository records may use a TID rkey
-  let cursor: string | undefined;
-  do {
-    const result = await ok(
-      client.get('com.atproto.repo.listRecords', {
-        params: {
-          repo: ownerDid as any,
-          collection: 'sh.tangled.repo' as any,
-          limit: 100,
-          ...(cursor ? { cursor } : {}),
-        },
-      }),
+  const repoDid = didFromAtUri(body.uri);
+  if (!repoDid) {
+    throw new Error(`Could not determine repo DID for "${repoName}"`);
+  }
+
+  let knot = body.knot;
+  let knotUrl = knot ? knotUrlFromHost(knot) : '';
+  if (!knot) {
+    // Fall back to the repo DID document, which names the knot as PDS.
+    const pdsUrl = await resolvePdsEndpoint(repoDid);
+    const parsed = parseUrl(pdsUrl);
+    knot = parsed?.host ?? '';
+    knotUrl = parsed ? `${parsed.protocol}//${parsed.host}` : '';
+  }
+
+  if (!knot) {
+    throw new Error(
+      `Could not determine knot host for repository "${repoName}"`,
     );
+  }
 
-    for (const rec of result.records) {
-      const value = rec.value as { name?: string };
-      if (value.name === repoName) {
-        return toRepoRef(value, repoName, rkeyFromUri(rec.uri));
-      }
-    }
-
-    cursor = result.cursor;
-  } while (cursor);
-
-  throw new Error(
-    `Tangled repository "${repoName}" was not found for ${ownerDid}`,
-  );
+  return {
+    knot,
+    knotUrl,
+    repoDid,
+    name: body.value?.declaration?.name ?? repoName,
+    defaultBranch: body.defaultBranch,
+  };
 }
 
 export function getBotDid(): string {
