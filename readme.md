@@ -6,7 +6,7 @@ This fork adds support for [Tangled](https://tangled.org), a git hosting platfor
 
 1. Create an AT Protocol account for the Renovate bot (e.g. on [Bluesky](https://bsky.app)). A dedicated bot account is recommended.
 2. Generate an App Password from Bluesky Settings > App Passwords.
-3. Register an SSH key for the bot account on Tangled. Git operations (clone/push) use SSH (`git@tangled.org:{ownerDid}/{repoName}` by default; configure `tangledSshHost` / `tangledSshPort` for self-hosted knots).
+3. Register an SSH key for the bot account on Tangled. Git operations (clone/push) use SSH (`git@tangled.org:{repoDid}` by default; configure `tangledSshHost` / `tangledSshPort` for self-hosted knots).
 
 The bot account's PDS is resolved automatically from the handle, so no PDS configuration is needed.
 
@@ -47,7 +47,7 @@ export RENOVATE_REPOSITORIES='["owner-handle.bsky.social/repo-name"]'
 | Issues                                    | Not supported (no-op)                                   |
 | Branch status checks                      | Not supported (always returns `green`)                  |
 | Reviewers / assignees                     | Not supported (no-op)                                   |
-| Labels                                    | Not supported (no-op)                                   |
+| Labels                                    | Supported (read/remove, e.g. the rebase label)          |
 
 ---
 

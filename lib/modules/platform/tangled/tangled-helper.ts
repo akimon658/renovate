@@ -1026,8 +1026,9 @@ export async function resolveRepoRef(
     body = res.body;
   } catch (err) {
     logger.debug({ err, ownerDid, repoName }, 'Failed to resolve repo');
+    const detail = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `Tangled repository "${repoName}" was not found for ${ownerDid}`,
+      `Tangled repository "${repoName}" was not found for ${ownerDid}: ${detail}`,
     );
   }
 
